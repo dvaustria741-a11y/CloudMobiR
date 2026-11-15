@@ -25,5 +25,8 @@ The run installs Blender (Chocolatey package `blender`) and tries to install Cla
 ## Roblox Player and Blender OpenGL
 The run downloads `RobloxPlayerInstaller.exe` to the desktop and attempts a silent install (URL in `ROBLOX_PLAYER_URL`). The runner has no GPU, so after Blender is installed the run copies Mesa's software OpenGL `opengl32.dll` (mmozeiko/build-mesa, llvmpipe x64, URL in `MESA_LLVMPIPE_URL`) next to `blender.exe`. That is what clears Blender's "OpenGL 4.3 or higher is required" error; Blender is slow on it. Both steps are non-fatal.
 
+## Roblox Diagnose shortcut
+If Roblox Player will not open a game, double-click `Roblox Diagnose` on the desktop. It starts the Player directly, then writes GPU, OS, exit code, recent Windows application errors and the newest Roblox logs to `roblox-diagnose.txt` on your desktop and opens it. Send that file's contents instead of typing commands over RDP.
+
 ## Claude Desktop fallback
 The desktop has a `Download Claude Desktop` shortcut that opens the official download page (claude.com/download). Download and run the Windows installer there, then sign in. No direct installer URL is hard-coded.

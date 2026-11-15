@@ -133,6 +133,59 @@ jobs:
           elseif ($p.ExitCode -ne 0) { Write-Host "Roblox installer exited with code $($p.ExitCode); run RobloxPlayerInstaller.exe from the desktop if Roblox Player is missing." }
           else { Write-Host 'Roblox Player installer finished.' }
 
+      - name: Add Roblox Diagnose shortcut to the desktop
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = 'C:\Users\Public\roblox-diagnose.ps1'
+          $body = @'
+          $ErrorActionPreference = 'Continue'
+          $out = Join-Path $env:USERPROFILE 'Desktop\roblox-diagnose.txt'
+          $lines = New-Object System.Collections.Generic.List[string]
+          function Add-Section($t) { $lines.Add(''); $lines.Add("=== $t ===") }
+          Add-Section 'System'
+          $os = Get-CimInstance Win32_OperatingSystem
+          $lines.Add("$($os.Caption) build $($os.BuildNumber)")
+          Get-CimInstance Win32_VideoController | ForEach-Object { $lines.Add("GPU: $($_.Name) | driver $($_.DriverVersion) | status $($_.Status)") }
+          $bcd = (bcdedit /enum '{current}' 2>&1 | Select-String 'testsigning') -join ' '
+          $lines.Add("bcdedit testsigning: $bcd")
+          Add-Section 'Player start test'
+          $root = Join-Path $env:LOCALAPPDATA 'Roblox\Versions'
+          $player = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'RobloxPlayerBeta.exe') } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $player) {
+            $lines.Add("No RobloxPlayerBeta.exe found under $root")
+          } else {
+            $lines.Add($player.FullName)
+            $p = Start-Process (Join-Path $player.FullName 'RobloxPlayerBeta.exe') -PassThru
+            Start-Sleep -Seconds 10
+            if ($p.HasExited) { $lines.Add("Player exited after under 10 s, exit code $($p.ExitCode)") } else { $lines.Add('Player process still running after 10 s (left running)') }
+          }
+          Add-Section 'Application errors, last 20 minutes'
+          $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Level = 2; StartTime = (Get-Date).AddMinutes(-20) } -MaxEvents 6 -ErrorAction SilentlyContinue
+          if (-not $ev) { $lines.Add('none') }
+          foreach ($e in $ev) { $lines.Add("$($e.TimeCreated) $($e.ProviderName): " + ((($e.Message -split "`n") | Select-Object -First 4) -join ' ')) }
+          Add-Section 'Newest Roblox logs'
+          $logs = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Roblox\logs') -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 6
+          foreach ($l in $logs) { $lines.Add("$($l.LastWriteTime) $($l.Length) $($l.Name)") }
+          $pl = $logs | Where-Object { $_.Name -like '*Player*' } | Select-Object -First 1
+          if ($pl) {
+            Add-Section "Last 40 lines of $($pl.Name)"
+            Get-Content $pl.FullName -Tail 40 | ForEach-Object { $lines.Add($_) }
+          } else {
+            Add-Section 'No Player log exists in the newest 6 files'
+          }
+          Set-Content -Path $out -Value $lines -Encoding utf8
+          Start-Process notepad.exe $out
+          '@
+          Set-Content -Path $script -Value $body -Encoding utf8
+          $lnk = 'C:\Users\Public\Desktop\Roblox Diagnose.lnk'
+          $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          $sh.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $sh.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`""
+          $sh.Save()
+          if (-not (Test-Path $lnk)) { throw 'Shortcut was not created.' }
+
       - name: Add Claude Desktop download shortcut to the desktop
         continue-on-error: true
         shell: pwsh
