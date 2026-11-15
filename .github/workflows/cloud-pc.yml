@@ -110,6 +110,15 @@ jobs:
           if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
           Write-Host "Installer saved to $dest ($($f.Length) bytes)"
 
+      - name: Add Claude Desktop download shortcut to the desktop
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'C:\Users\Public\Desktop\Download Claude Desktop.url'
+          Set-Content -Path $path -Value "[InternetShortcut]`r`nURL=https://claude.com/download" -Encoding ascii
+          if (-not (Test-Path $path)) { throw 'Shortcut was not created.' }
+
       - name: Keep session alive
         shell: pwsh
         run: |

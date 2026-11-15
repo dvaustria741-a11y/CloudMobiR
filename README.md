@@ -18,3 +18,6 @@ The runner is wiped when the run ends (maximum 6 hours per job); start a new run
 
 ## Roblox Studio
 The run puts `RobloxStudioInstaller.exe` on the cloud PC's desktop. Double-click it inside the RDP session and sign in. The download URL is set in `STUDIO_INSTALLER_URL` in the workflow; if that step fails, the session still starts and you can download Studio from inside the PC. The runner has no GPU, so Studio uses software rendering.
+
+## Claude Desktop
+The desktop has a `Download Claude Desktop` shortcut that opens the official download page (claude.com/download). Download and run the Windows installer there, then sign in. No direct installer URL is hard-coded.
