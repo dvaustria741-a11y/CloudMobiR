@@ -58,4 +58,6 @@ try {
     Write-Host "Save failed: $_"
 } finally {
     foreach ($p in @($stage, $archive)) { if ($p -and (Test-Path $p)) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue } }
+    # A failed native command (for example gh when no release exists yet) must not become the step's exit code.
+    $global:LASTEXITCODE = 0
 }
