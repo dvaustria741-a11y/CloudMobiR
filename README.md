@@ -28,5 +28,8 @@ The run downloads `RobloxPlayerInstaller.exe` to the desktop and attempts a sile
 ## Roblox Diagnose shortcut
 If Roblox Player will not open a game, double-click `Roblox Diagnose` on the desktop. It starts the Player directly, then writes GPU, OS, exit code, recent Windows application errors and the newest Roblox logs to `roblox-diagnose.txt` on your desktop and opens it. Send that file's contents instead of typing commands over RDP.
 
+## Disable Test Mode (experiment)
+Tick `disable_test_mode` when you run the workflow to turn off Windows Test Mode and restart the runner after setup. This is untested: a GitHub-hosted runner may end the job on restart. If the PC does come back, it should reappear on Tailscale after about 2 minutes with the same RDP user. The step prints the boot settings before and after so you can see what changed.
+
 ## Claude Desktop fallback
 The desktop has a `Download Claude Desktop` shortcut that opens the official download page (claude.com/download). Download and run the Windows installer there, then sign in. No direct installer URL is hard-coded.

@@ -11,6 +11,11 @@ on:
         description: Windows account created for RDP
         required: true
         default: cloudpc
+      disable_test_mode:
+        description: Experiment - turn off Windows Test Mode and restart the runner after setup (the session may not survive the restart)
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: cloud-pc
@@ -267,6 +272,23 @@ jobs:
           Add-AppxProvisionedPackage -Online -PackagePath $msixPath -SkipLicense | Out-Null
           Remove-Item $msixPath -Force -ErrorAction SilentlyContinue
           Write-Host 'Claude Desktop provisioned. It appears after the RDP user signs in.'
+
+      - name: Disable Windows Test Mode and restart
+        if: ${{ inputs.disable_test_mode }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'Before:'
+          bcdedit /enum '{current}'
+          bcdedit /set testsigning off
+          if ($LASTEXITCODE -ne 0) { throw "bcdedit /set testsigning off exited with code $LASTEXITCODE; not restarting." }
+          Write-Host 'After:'
+          bcdedit /enum '{current}'
+          # Assumption, not verified by me: Tailscale (unattended service), RDP and the local user survive the restart, so the PC comes back on the tailnet. A hosted runner may end the job when it restarts.
+          Write-Host 'Restarting in 15 seconds. Reconnect over Tailscale and RDP after about 2 minutes.'
+          shutdown /r /t 15 /c 'Disable Test Mode'
+          Start-Sleep -Seconds 180
 
       - name: Keep session alive
         shell: pwsh
