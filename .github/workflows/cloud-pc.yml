@@ -27,6 +27,8 @@ jobs:
       SESSION_MINUTES: ${{ inputs.minutes }}
       # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
       STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
+      # Direct URL of the official x64 Claude Desktop MSIX. Empty = not set (the step then tries winget).
+      CLAUDE_MSIX_URL: ''
     steps:
       - name: Check inputs and secrets
         shell: pwsh
@@ -141,15 +143,29 @@ jobs:
 
       - name: Install Claude Desktop
         continue-on-error: true
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # Assumptions, not verified by me: winget exists on this runner, and the package id is Anthropic.Claude.
-          # If either is wrong this step fails and the 'Download Claude Desktop' desktop shortcut is the fallback.
-          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'winget is not available on this runner.' }
-          winget install --id Anthropic.Claude -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          if ($LASTEXITCODE -ne 0) { throw "winget install Anthropic.Claude exited with code $LASTEXITCODE." }
-          Write-Host 'Claude Desktop installed.'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $url = $env:CLAUDE_MSIX_URL
+          if ([string]::IsNullOrWhiteSpace($url)) {
+            # Unset on purpose: no verified MSIX URL was given. Fall back to winget (id unverified by me).
+            if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'CLAUDE_MSIX_URL is unset and winget is not available. Set CLAUDE_MSIX_URL in the workflow env.' }
+            winget install --id Anthropic.Claude -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+            if ($LASTEXITCODE -ne 0) { throw "winget install Anthropic.Claude exited with code $LASTEXITCODE." }
+            return
+          }
+          $msixPath = Join-Path $env:TEMP 'Claude.msix'
+          Invoke-WebRequest -Uri $url -OutFile $msixPath -UseBasicParsing
+          # An MSIX is a zip: reject an HTML page or a stub before provisioning.
+          $f = Get-Item $msixPath
+          $head = [System.IO.File]::ReadAllBytes($msixPath)[0..1]
+          if ($f.Length -lt 1MB -or $head[0] -ne 0x50 -or $head[1] -ne 0x4B) { Remove-Item $msixPath -Force; throw "Downloaded file is not an MSIX package ($($f.Length) bytes). Check CLAUDE_MSIX_URL." }
+          # Provisioned system-wide; it registers for the RDP user at that user's first sign-in.
+          Add-AppxProvisionedPackage -Online -PackagePath $msixPath -SkipLicense | Out-Null
+          Remove-Item $msixPath -Force -ErrorAction SilentlyContinue
+          Write-Host 'Claude Desktop provisioned. It appears after the RDP user signs in.'
 
       - name: Keep session alive
         shell: pwsh
