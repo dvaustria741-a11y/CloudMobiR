@@ -119,6 +119,38 @@ jobs:
           Set-Content -Path $path -Value "[InternetShortcut]`r`nURL=https://claude.com/download" -Encoding ascii
           if (-not (Test-Path $path)) { throw 'Shortcut was not created.' }
 
+      - name: Install Blender
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Assumption, not verified by me: Chocolatey (preinstalled on GitHub Windows runners) has a 'blender' package.
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) { throw 'choco is not available on this runner.' }
+          choco install blender -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install blender exited with code $LASTEXITCODE." }
+          $exe = Get-ChildItem -Path "$env:ProgramFiles\Blender Foundation" -Filter blender.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'blender.exe not found after install.' }
+          $lnk = 'C:\Users\Public\Desktop\Blender.lnk'
+          if (-not (Test-Path $lnk)) {
+            $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+            $sh.TargetPath = $exe.FullName
+            $sh.WorkingDirectory = $exe.DirectoryName
+            $sh.Save()
+          }
+          Write-Host "Blender installed: $($exe.FullName)"
+
+      - name: Install Claude Desktop
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Assumptions, not verified by me: winget exists on this runner, and the package id is Anthropic.Claude.
+          # If either is wrong this step fails and the 'Download Claude Desktop' desktop shortcut is the fallback.
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'winget is not available on this runner.' }
+          winget install --id Anthropic.Claude -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "winget install Anthropic.Claude exited with code $LASTEXITCODE." }
+          Write-Host 'Claude Desktop installed.'
+
       - name: Keep session alive
         shell: pwsh
         run: |
