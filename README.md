@@ -22,5 +22,8 @@ The run puts `RobloxStudioInstaller.exe` on the cloud PC's desktop. Double-click
 ## Blender and Claude Desktop
 The run installs Blender (Chocolatey package `blender`) and tries to install Claude Desktop (winget id `Anthropic.Claude`) after RDP is already reachable, so connect when "Verify RDP is reachable" is green and give the installs a few minutes. Both steps are non-fatal; check their step logs if an app is missing. The runner has no GPU, so Blender renders on the CPU.
 
+## Roblox Player and Blender OpenGL
+The run downloads `RobloxPlayerInstaller.exe` to the desktop and attempts a silent install (URL in `ROBLOX_PLAYER_URL`). The runner has no GPU, so after Blender is installed the run copies Mesa's software OpenGL `opengl32.dll` (mmozeiko/build-mesa, llvmpipe x64, URL in `MESA_LLVMPIPE_URL`) next to `blender.exe`. That is what clears Blender's "OpenGL 4.3 or higher is required" error; Blender is slow on it. Both steps are non-fatal.
+
 ## Claude Desktop fallback
 The desktop has a `Download Claude Desktop` shortcut that opens the official download page (claude.com/download). Download and run the Windows installer there, then sign in. No direct installer URL is hard-coded.

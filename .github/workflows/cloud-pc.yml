@@ -27,6 +27,10 @@ jobs:
       SESSION_MINUTES: ${{ inputs.minutes }}
       # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
       STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
+      # Assumption, not verified by me (not reachable from my sandbox): Roblox Player installer redirect.
+      ROBLOX_PLAYER_URL: https://www.roblox.com/download/client
+      # Verified by me: mmozeiko/build-mesa release 26.3.0 asset lists opengl32.dll (statically linked llvmpipe, software OpenGL). Not run on this runner.
+      MESA_LLVMPIPE_URL: https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/mesa-llvmpipe-x64-26.3.0.7z
       # Official x64 Claude Desktop MSIX, redirect URL from Anthropic's Intune deployment README (found by web search, not tested by me on this runner). Empty would mean not set.
       CLAUDE_MSIX_URL: https://claude.ai/api/desktop/win32/x64/msix/latest/redirect
     steps:
@@ -112,6 +116,23 @@ jobs:
           if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
           Write-Host "Installer saved to $dest ($($f.Length) bytes)"
 
+      - name: Install Roblox Player
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $dest = 'C:\Users\Public\Desktop\RobloxPlayerInstaller.exe'
+          Invoke-WebRequest -Uri $env:ROBLOX_PLAYER_URL -OutFile $dest -UseBasicParsing
+          $f = Get-Item $dest
+          $head = [System.IO.File]::ReadAllBytes($dest)[0..1]
+          if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes). Check ROBLOX_PLAYER_URL." }
+          # Assumption, not verified by me: the Roblox bootstrapper accepts -silent. The installer stays on the desktop either way.
+          $p = Start-Process -FilePath $dest -ArgumentList '-silent' -PassThru
+          if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Write-Host 'Silent install timed out; run RobloxPlayerInstaller.exe from the desktop.' }
+          elseif ($p.ExitCode -ne 0) { Write-Host "Roblox installer exited with code $($p.ExitCode); run RobloxPlayerInstaller.exe from the desktop if Roblox Player is missing." }
+          else { Write-Host 'Roblox Player installer finished.' }
+
       - name: Add Claude Desktop download shortcut to the desktop
         continue-on-error: true
         shell: pwsh
@@ -140,6 +161,33 @@ jobs:
             $sh.Save()
           }
           Write-Host "Blender installed: $($exe.FullName)"
+
+      - name: Enable software OpenGL (Mesa llvmpipe) for Blender
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $exe = Get-ChildItem -Path "$env:ProgramFiles\Blender Foundation" -Filter blender.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'blender.exe not found; the Install Blender step did not succeed.' }
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip -and (Test-Path "$env:ProgramFiles\7-Zip\7z.exe")) { $sevenZip = "$env:ProgramFiles\7-Zip\7z.exe" }
+          if (-not $sevenZip) { throw '7z is not available on this runner.' }
+          $archive = Join-Path $env:RUNNER_TEMP 'mesa-llvmpipe.7z'
+          $out = Join-Path $env:RUNNER_TEMP 'mesa-llvmpipe'
+          Invoke-WebRequest -Uri $env:MESA_LLVMPIPE_URL -OutFile $archive -UseBasicParsing
+          if ((Get-Item $archive).Length -lt 1MB) { throw 'Mesa archive is unexpectedly small.' }
+          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+          & $sevenZip x $archive "-o$out" opengl32.dll -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed with exit code $LASTEXITCODE." }
+          $dll = Join-Path $out 'opengl32.dll'
+          $head = [System.IO.File]::ReadAllBytes($dll)[0..1]
+          if (-not (Test-Path $dll) -or (Get-Item $dll).Length -lt 1MB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { throw 'Extracted opengl32.dll is missing or not a valid DLL.' }
+          # Blender loads opengl32.dll from its own folder first, so this overrides the runner's GPU-less system OpenGL.
+          Copy-Item -Path $dll -Destination (Join-Path $exe.DirectoryName 'opengl32.dll') -Force
+          Remove-Item $archive -Force -ErrorAction SilentlyContinue
+          Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Mesa llvmpipe opengl32.dll installed next to $($exe.FullName)"
 
       - name: Install Claude Desktop
         continue-on-error: true
