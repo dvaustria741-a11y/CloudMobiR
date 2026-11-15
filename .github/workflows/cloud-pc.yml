@@ -1,0 +1,107 @@
+name: Cloud PC
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Session length in minutes (hosted runner hard limit is 360 per job)
+        required: true
+        default: '330'
+      username:
+        description: Windows account created for RDP
+        required: true
+        default: cloudpc
+
+concurrency:
+  group: cloud-pc
+  cancel-in-progress: true
+
+jobs:
+  cloud-pc:
+    runs-on: windows-2025
+    timeout-minutes: 355
+    env:
+      RDP_USERNAME: ${{ inputs.username }}
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      SESSION_MINUTES: ${{ inputs.minutes }}
+    steps:
+      - name: Check inputs and secrets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) { throw 'Missing repository secret TAILSCALE_AUTH_KEY.' }
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) { throw 'Missing repository secret RDP_PASSWORD.' }
+          $m = 0
+          if (-not [int]::TryParse($env:SESSION_MINUTES, [ref]$m) -or $m -lt 1 -or $m -gt 350) { throw 'minutes must be a number from 1 to 350.' }
+          if ($env:RDP_USERNAME -notmatch '^[A-Za-z][A-Za-z0-9_]{0,19}$') { throw 'username must be 1-20 letters, digits or underscores, starting with a letter.' }
+
+      - name: Enable Remote Desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ts = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          Set-ItemProperty -Path $ts -Name fDenyTSConnections -Value 0 -Force
+          Set-ItemProperty -Path "$ts\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1 -Force
+          Get-NetFirewallRule -DisplayName 'CloudPC RDP (Tailscale only)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+          New-NetFirewallRule -DisplayName 'CloudPC RDP (Tailscale only)' -Direction Inbound -Protocol TCP -LocalPort 3389 -RemoteAddress 100.64.0.0/10 -Action Allow | Out-Null
+          Restart-Service -Name TermService -Force
+          if ((Get-Service -Name TermService).Status -ne 'Running') { throw 'TermService is not running.' }
+
+      - name: Create RDP user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $secure = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          if (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name $env:RDP_USERNAME -Password $secure
+          } else {
+            New-LocalUser -Name $env:RDP_USERNAME -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          }
+          Add-LocalGroupMember -Group 'Administrators' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Join-Path $env:RUNNER_TEMP 'tailscale.msi'
+          Invoke-WebRequest -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi
+          $p = Start-Process -FilePath msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Tailscale MSI exited with code $($p.ExitCode)." }
+          if (-not (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe")) { throw 'tailscale.exe not found after install.' }
+
+      - name: Join tailnet
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          for ($i = 0; $i -lt 30 -and (Get-Service -Name Tailscale -ErrorAction SilentlyContinue).Status -ne 'Running'; $i++) { Start-Sleep -Seconds 2 }
+          if ((Get-Service -Name Tailscale).Status -ne 'Running') { throw 'Tailscale service is not running.' }
+          & $ts up --auth-key="$env:TS_AUTHKEY" --hostname=cloudpc --unattended --accept-dns=false
+          if ($LASTEXITCODE -ne 0) { throw "tailscale up failed with exit code $LASTEXITCODE." }
+          $ip = ''
+          for ($i = 0; $i -lt 30 -and [string]::IsNullOrWhiteSpace($ip); $i++) {
+            $ip = ((& $ts ip -4) | Select-Object -First 1)
+            if ([string]::IsNullOrWhiteSpace($ip)) { Start-Sleep -Seconds 2 }
+          }
+          if ([string]::IsNullOrWhiteSpace($ip)) { throw 'No Tailscale IPv4 address was assigned.' }
+          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify RDP is reachable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $r = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          if (-not $r.TcpTestSucceeded) { throw "TCP 3389 on $env:TAILSCALE_IP is not reachable." }
+          Write-Host "RDP ready on $env:TAILSCALE_IP (user: $env:RDP_USERNAME, password: your RDP_PASSWORD secret)"
+
+      - name: Keep session alive
+        shell: pwsh
+        run: |
+          $end = (Get-Date).AddMinutes([int]$env:SESSION_MINUTES)
+          Write-Host "Session ends at $($end.ToUniversalTime().ToString('u'))"
+          while ((Get-Date) -lt $end) {
+            Start-Sleep -Seconds 60
+            if ((Get-Service -Name TermService).Status -ne 'Running') { throw 'TermService stopped.' }
+          }
