@@ -27,8 +27,8 @@ jobs:
       SESSION_MINUTES: ${{ inputs.minutes }}
       # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
       STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
-      # Direct URL of the official x64 Claude Desktop MSIX. Empty = not set (the step then tries winget).
-      CLAUDE_MSIX_URL: ''
+      # Official x64 Claude Desktop MSIX, redirect URL from Anthropic's Intune deployment README (found by web search, not tested by me on this runner). Empty would mean not set.
+      CLAUDE_MSIX_URL: https://claude.ai/api/desktop/win32/x64/msix/latest/redirect
     steps:
       - name: Check inputs and secrets
         shell: pwsh
