@@ -11,18 +11,27 @@ on:
         description: Windows account created for RDP
         required: true
         default: cloudpc
+      performance_tweaks:
+        description: Apply the performance tweaks (High performance power plan, Defender real-time scanning off, lighter visual effects)
+        type: boolean
+        required: false
+        default: true
       auto_continue:
-        description: When the session ends, save state and start a fresh Cloud PC run that restores it (keeps going until you cancel; the Tailscale IP may change)
+        description: Keep going past the 6-hour limit - about 20 minutes before this PC ends, save state and start a new PC that restores it (shows in Tailscale as cloudpc-<run number>; cancel all runs to stop)
         type: boolean
         required: false
         default: false
+      previous_run:
+        description: Internal, set automatically when a run starts its successor. Leave empty.
+        required: false
+        default: ''
 
 permissions:
   contents: write
   actions: write
 
 concurrency:
-  group: cloud-pc
+  group: cloud-pc-${{ inputs.previous_run || 'manual' }}
   cancel-in-progress: true
 
 jobs:
@@ -34,6 +43,8 @@ jobs:
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
       TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       SESSION_MINUTES: ${{ inputs.minutes }}
+      AUTO_CONTINUE: ${{ inputs.auto_continue }}
+      PERF_TWEAKS: ${{ inputs.performance_tweaks }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       STATE_PASSWORD: ${{ secrets.STATE_PASSWORD }}
@@ -60,6 +71,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) { throw 'Missing repository secret RDP_PASSWORD.' }
           $m = 0
           if (-not [int]::TryParse($env:SESSION_MINUTES, [ref]$m) -or $m -lt 1 -or $m -gt 350) { throw 'minutes must be a number from 1 to 350.' }
+          if ($env:AUTO_CONTINUE -eq 'true' -and $m -lt 60) { throw 'auto_continue needs a session of at least 60 minutes.' }
           if ($env:RDP_USERNAME -notmatch '^[A-Za-z][A-Za-z0-9_]{0,19}$') { throw 'username must be 1-20 letters, digits or underscores, starting with a letter.' }
 
       - name: Enable Remote Desktop
@@ -88,6 +100,7 @@ jobs:
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
 
       - name: Performance tweaks (best effort)
+        if: ${{ inputs.performance_tweaks }}
         continue-on-error: true
         shell: pwsh
         run: |
@@ -134,7 +147,7 @@ jobs:
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
           for ($i = 0; $i -lt 30 -and (Get-Service -Name Tailscale -ErrorAction SilentlyContinue).Status -ne 'Running'; $i++) { Start-Sleep -Seconds 2 }
           if ((Get-Service -Name Tailscale).Status -ne 'Running') { throw 'Tailscale service is not running.' }
-          & $ts up --auth-key="$env:TS_AUTHKEY" --hostname=cloudpc --unattended --accept-dns=false
+          & $ts up --auth-key="$env:TS_AUTHKEY" --hostname="cloudpc-$env:GITHUB_RUN_NUMBER" --unattended --accept-dns=false
           if ($LASTEXITCODE -ne 0) { throw "tailscale up failed with exit code $LASTEXITCODE." }
           $ip = ''
           for ($i = 0; $i -lt 30 -and [string]::IsNullOrWhiteSpace($ip); $i++) {
@@ -150,7 +163,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $r = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
           if (-not $r.TcpTestSucceeded) { throw "TCP 3389 on $env:TAILSCALE_IP is not reachable." }
-          Write-Host "RDP ready on $env:TAILSCALE_IP (user: $env:RDP_USERNAME, password: your RDP_PASSWORD secret)"
+          Write-Host "RDP ready on $env:TAILSCALE_IP (Tailscale name: cloudpc-$env:GITHUB_RUN_NUMBER, user: $env:RDP_USERNAME, password: your RDP_PASSWORD secret)"
+          "### Cloud PC ready`n`nTailscale name: ``cloudpc-$env:GITHUB_RUN_NUMBER``  IP: ``$env:TAILSCALE_IP``  user: ``$env:RDP_USERNAME``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Download Roblox Studio installer to the desktop
         continue-on-error: true
@@ -324,27 +338,37 @@ jobs:
           $hardEnd = ([datetime]::Parse($env:JOB_START_UTC, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().AddMinutes(340)
           if ($end -gt $hardEnd) { $end = $hardEnd; Write-Host 'Session length was shortened so the final save fits inside the runner time limit.' }
           Write-Host "Session ends at $($end.ToUniversalTime().ToString('u'))"
+          $handoverAt = $end.AddMinutes(-20)
+          $handedOver = $false
+          $handoverTries = 0
           $nextSave = (Get-Date).AddMinutes(30)
           while ((Get-Date) -lt $end) {
             Start-Sleep -Seconds 60
             if ((Get-Service -Name TermService).Status -ne 'Running') { throw 'TermService stopped.' }
-            if ((Get-Date) -ge $nextSave) {
+            if (-not $handedOver -and $env:AUTO_CONTINUE -eq 'true' -and $handoverTries -lt 5 -and (Get-Date) -ge $handoverAt) {
+              $handoverTries++
+              # Save first, so the new PC restores the newest state, then start the next run while this PC stays usable.
+              $marker = Join-Path $env:RUNNER_TEMP 'last-save-ok.txt'
+              Remove-Item $marker -Force -ErrorAction SilentlyContinue
+              try { & "$env:GITHUB_WORKSPACE\scripts\save-state.ps1" } catch { Write-Host "Handover save failed: $_" }
+              if (Test-Path $marker) {
+                gh workflow run cloud-pc.yml --ref main -f minutes=$env:SESSION_MINUTES -f username=$env:RDP_USERNAME -f performance_tweaks=$env:PERF_TWEAKS -f auto_continue=true -f previous_run=$env:GITHUB_RUN_ID
+                if ($LASTEXITCODE -eq 0) {
+                  $handedOver = $true
+                  'HANDED_OVER=1' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+                  Write-Host '=== HANDOVER: the next Cloud PC run was started. In about 10-15 minutes a new device named cloudpc-<run number> appears in Tailscale. Save your work in Studio, then move to the new PC. Changes made on this PC after this point are NOT saved. ==='
+                } else { Write-Host "Could not start the next run (exit code $LASTEXITCODE); try $handoverTries of 5." }
+              } else { Write-Host "Handover save did not succeed (is STATE_PASSWORD set?); try $handoverTries of 5." }
+            }
+            elseif (-not $handedOver -and (Get-Date) -ge $nextSave) {
               try { & "$env:GITHUB_WORKSPACE\scripts\save-state.ps1" } catch { Write-Host "Autosave failed: $_" }
               $nextSave = (Get-Date).AddMinutes(30)
             }
           }
 
       - name: Save state
-        if: ${{ always() }}
+        if: ${{ always() && env.HANDED_OVER != '1' }}
         continue-on-error: true
         shell: pwsh
         run: ./scripts/save-state.ps1
 
-      - name: Start the next Cloud PC run
-        if: ${{ success() && inputs.auto_continue }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          gh workflow run cloud-pc.yml --ref main -f minutes=$env:SESSION_MINUTES -f username=$env:RDP_USERNAME -f auto_continue=true
-          if ($LASTEXITCODE -ne 0) { throw "Could not start the next run (exit code $LASTEXITCODE)." }
-          Write-Host 'Next run requested. This run is replaced when it starts.'

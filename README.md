@@ -35,8 +35,12 @@ The desktop has a `Download Claude Desktop` shortcut that opens the official dow
 - Every 30 minutes, and again when the session ends or is cancelled, the run saves the cloud PC user's `Desktop`, `Documents`, Roblox settings/plugins/autosaves/login storage and Roblox registry settings into an encrypted 7z (`cloudpc-state.7z`) attached to the `cloudpc-state` release. The next run restores it right after the user is created.
 - The password is the `STATE_PASSWORD` repository secret. Keep it private: the archive can contain your Roblox session.
 - Roblox login restoring is not guaranteed. Windows encrypts the stored session per user and per machine, so you may be asked to sign in again; projects and settings are restored regardless.
-- Run workflow with `auto_continue` enabled to chain runs: near the 6-hour limit it saves, then starts a fresh run that restores the state. Reconnect to the new PC (check the Tailscale app for its IP). Cancel the run to stop the chain.
+- Run workflow with `auto_continue` ticked to keep going past the 6-hour limit: about 20 minutes before the PC ends it saves, then starts a new run that restores that state. The new PC shows up in Tailscale as `cloudpc-<run number>` after about 10-15 minutes (the run page also lists its IP). Save your work in Studio and move to the new PC; changes made on the old PC after the handover are not saved. Cancel every running Cloud PC run to stop the chain.
 - If you start a new run by hand while an old one is running, the old one is cancelled; wait for its "Save state" step to finish first so the newest files are saved.
 
 ## Performance
 A best-effort step sets the High performance power plan, turns off Defender real-time scanning, and gives new profiles "best performance" visual effects and no wallpaper. These are unverified on the runner. The runner has no GPU, so Roblox Studio renders on the CPU; lowering Studio's own quality settings helps most, and Roblox settings are kept by the saved state.
+
+## Options
+- `performance_tweaks` (default on): turn it off to skip the performance tweaks step.
+- `previous_run` is internal; leave it empty.

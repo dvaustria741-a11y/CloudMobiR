@@ -54,6 +54,7 @@ try {
     gh release upload $tag $archive --clobber
     if ($LASTEXITCODE -ne 0) { Write-Host 'Save failed: release upload error.'; return }
     Write-Host "Saved state: $([math]::Round($size / 1MB, 1)) MB at $((Get-Date).ToUniversalTime().ToString('u'))"
+    Set-Content -Path (Join-Path $env:RUNNER_TEMP 'last-save-ok.txt') -Value (Get-Date).ToUniversalTime().ToString('o')
 } catch {
     Write-Host "Save failed: $_"
 } finally {
