@@ -15,3 +15,6 @@ A Windows cloud PC you start from your phone: a GitHub Actions run boots a Windo
 3. Turn Tailscale on, then in the Windows App add a PC: address = that IP, user = `cloudpc` (or the username you chose), password = your `RDP_PASSWORD`.
 
 The runner is wiped when the run ends (maximum 6 hours per job); start a new run to get a fresh PC.
+
+## Roblox Studio
+The run puts `RobloxStudioInstaller.exe` on the cloud PC's desktop. Double-click it inside the RDP session and sign in. The download URL is set in `STUDIO_INSTALLER_URL` in the workflow; if that step fails, the session still starts and you can download Studio from inside the PC. The runner has no GPU, so Studio uses software rendering.

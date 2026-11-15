@@ -25,6 +25,8 @@ jobs:
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
       TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       SESSION_MINUTES: ${{ inputs.minutes }}
+      # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
+      STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
     steps:
       - name: Check inputs and secrets
         shell: pwsh
@@ -95,6 +97,18 @@ jobs:
           $r = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
           if (-not $r.TcpTestSucceeded) { throw "TCP 3389 on $env:TAILSCALE_IP is not reachable." }
           Write-Host "RDP ready on $env:TAILSCALE_IP (user: $env:RDP_USERNAME, password: your RDP_PASSWORD secret)"
+
+      - name: Download Roblox Studio installer to the desktop
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = 'C:\Users\Public\Desktop\RobloxStudioInstaller.exe'
+          Invoke-WebRequest -Uri $env:STUDIO_INSTALLER_URL -OutFile $dest
+          $f = Get-Item $dest
+          $head = [System.IO.File]::ReadAllBytes($dest)[0..1]
+          if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
+          Write-Host "Installer saved to $dest ($($f.Length) bytes)"
 
       - name: Keep session alive
         shell: pwsh
