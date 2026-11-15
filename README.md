@@ -40,3 +40,6 @@ The desktop has a `Download Claude Desktop` shortcut that opens the official dow
 - Roblox login restoring is not guaranteed. Windows encrypts the stored session per user and per machine, so you may be asked to sign in again; projects and settings are restored regardless.
 - Run workflow with `auto_continue` enabled to chain runs: near the 6-hour limit it saves, then starts a fresh run that restores the state. Reconnect to the new PC (check the Tailscale app for its IP). Cancel the run to stop the chain.
 - If you start a new run by hand while an old one is running, the old one is cancelled; wait for its "Save state" step to finish first so the newest files are saved.
+
+## Performance
+A best-effort step sets the High performance power plan, turns off Defender real-time scanning, and gives new profiles "best performance" visual effects and no wallpaper. These are unverified on the runner. The runner has no GPU, so Roblox Studio renders on the CPU; lowering Studio's own quality settings helps most, and Roblox settings are kept by the saved state.

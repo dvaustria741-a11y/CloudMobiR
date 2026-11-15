@@ -92,6 +92,31 @@ jobs:
           Add-LocalGroupMember -Group 'Administrators' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
 
+      - name: Performance tweaks (best effort)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # Verified GUID of the built-in High performance power plan.
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          # Assumption, not verified on this runner: real-time scanning can be switched off here (it competes with Studio for CPU).
+          try { Set-MpPreference -DisableRealtimeMonitoring $true } catch { Write-Host "Defender real-time scanning not changed: $_" }
+          # New profiles are copied from the Default user hive, so set "best performance" visual effects there before the RDP user's profile exists.
+          # Values are the common Windows performance-tuning ones (VisualFXSetting 2, UserPreferencesMask 9012038010000000); not verified on this runner.
+          $hive = 'C:\Users\Default\NTUSER.DAT'
+          $name = 'CloudPcDefault'
+          if (Test-Path "C:\Users\$env:RDP_USERNAME") { Write-Host 'Profile already exists; Default-user visual effects are not applied to it.' }
+          reg load "HKU\$name" $hive | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Host 'Could not load the Default user hive; skipping visual effect tweaks.'; return }
+          reg add "HKU\$name\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f | Out-Null
+          reg add "HKU\$name\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9012038010000000 /f | Out-Null
+          reg add "HKU\$name\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f | Out-Null
+          reg add "HKU\$name\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "" /f | Out-Null
+          reg add "HKU\$name\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d 0 /f | Out-Null
+          [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+          for ($i = 0; $i -lt 5; $i++) { reg unload "HKU\$name" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep -Seconds 2 }
+          Write-Host 'Performance tweaks applied.'
+
       - name: Restore saved state
         continue-on-error: true
         shell: pwsh
