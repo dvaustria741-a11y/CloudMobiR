@@ -16,6 +16,15 @@ on:
         type: boolean
         required: false
         default: false
+      auto_continue:
+        description: When the session ends, save state and start a fresh Cloud PC run that restores it (keeps going until you cancel; the Tailscale IP may change)
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  actions: write
 
 concurrency:
   group: cloud-pc
@@ -30,6 +39,9 @@ jobs:
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
       TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       SESSION_MINUTES: ${{ inputs.minutes }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      STATE_PASSWORD: ${{ secrets.STATE_PASSWORD }}
       # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
       STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
       # Assumption, not verified by me (not reachable from my sandbox): Roblox Player installer redirect.
@@ -39,6 +51,12 @@ jobs:
       # Official x64 Claude Desktop MSIX, redirect URL from Anthropic's Intune deployment README (found by web search, not tested by me on this runner). Empty would mean not set.
       CLAUDE_MSIX_URL: https://claude.ai/api/desktop/win32/x64/msix/latest/redirect
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Record job start time
+        shell: pwsh
+        run: '"JOB_START_UTC=$((Get-Date).ToUniversalTime().ToString(''o''))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
+
       - name: Check inputs and secrets
         shell: pwsh
         run: |
@@ -73,6 +91,11 @@ jobs:
           }
           Add-LocalGroupMember -Group 'Administrators' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+
+      - name: Restore saved state
+        continue-on-error: true
+        shell: pwsh
+        run: ./scripts/restore-state.ps1
 
       - name: Install Tailscale
         shell: pwsh
@@ -294,8 +317,31 @@ jobs:
         shell: pwsh
         run: |
           $end = (Get-Date).AddMinutes([int]$env:SESSION_MINUTES)
+          # Leave about 15 minutes before the 355-minute job timeout (6 h runner limit) for the final save and handover.
+          $hardEnd = ([datetime]::Parse($env:JOB_START_UTC, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().AddMinutes(340)
+          if ($end -gt $hardEnd) { $end = $hardEnd; Write-Host 'Session length was shortened so the final save fits inside the runner time limit.' }
           Write-Host "Session ends at $($end.ToUniversalTime().ToString('u'))"
+          $nextSave = (Get-Date).AddMinutes(30)
           while ((Get-Date) -lt $end) {
             Start-Sleep -Seconds 60
             if ((Get-Service -Name TermService).Status -ne 'Running') { throw 'TermService stopped.' }
+            if ((Get-Date) -ge $nextSave) {
+              try { & "$env:GITHUB_WORKSPACE\scripts\save-state.ps1" } catch { Write-Host "Autosave failed: $_" }
+              $nextSave = (Get-Date).AddMinutes(30)
+            }
           }
+
+      - name: Save state
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: pwsh
+        run: ./scripts/save-state.ps1
+
+      - name: Start the next Cloud PC run
+        if: ${{ success() && inputs.auto_continue }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh workflow run cloud-pc.yml --ref main -f minutes=$env:SESSION_MINUTES -f username=$env:RDP_USERNAME -f auto_continue=true
+          if ($LASTEXITCODE -ne 0) { throw "Could not start the next run (exit code $LASTEXITCODE)." }
+          Write-Host 'Next run requested. This run is replaced when it starts.'
