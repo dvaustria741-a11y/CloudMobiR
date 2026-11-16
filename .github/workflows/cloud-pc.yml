@@ -442,6 +442,45 @@ jobs:
             }
           }
 
+      - name: Set Claude Desktop MCP config (Roblox Studio)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The whole claude_desktop_config.json is replaced with this, as requested. Claude Desktop's own keys in that file are dropped.
+          $body = @'
+          {
+            "mcpServers": {
+              "Roblox_Studio": {
+                "command": "cmd.exe",
+                "args": [
+                  "/c",
+                  "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat"
+                ]
+              }
+            }
+          }
+          '@
+          $null = $body | ConvertFrom-Json   # throws if the JSON is malformed
+
+          # The RDP user's profile may not exist yet (Windows creates it at first sign-in, and a folder made beforehand can end up as a duplicate profile), so the file is kept in a shared folder and copied into %APPDATA%\Claude at every sign-in by an all-users Startup script.
+          $shared = 'C:\ProgramData\CloudMobiR'
+          New-Item -ItemType Directory -Force -Path $shared | Out-Null
+          Set-Content -Path (Join-Path $shared 'claude_desktop_config.json') -Value $body -Encoding utf8
+
+          $startup = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp'
+          $cmd = "@echo off`r`nif not exist `"%APPDATA%\Claude`" mkdir `"%APPDATA%\Claude`"`r`ncopy /Y `"$shared\claude_desktop_config.json`" `"%APPDATA%\Claude\claude_desktop_config.json`" >nul`r`n"
+          Set-Content -Path (Join-Path $startup 'claude-mcp-config.cmd') -Value $cmd -Encoding ascii
+
+          # If the profile is already there (restored state), apply it now as well.
+          $dir = "C:\Users\$env:RDP_USERNAME\AppData\Roaming\Claude"
+          if (Test-Path $dir) {
+            Copy-Item (Join-Path $shared 'claude_desktop_config.json') (Join-Path $dir 'claude_desktop_config.json') -Force
+            Write-Host "Replaced $dir\claude_desktop_config.json"
+          } else {
+            Write-Host 'Profile not created yet; the config is applied at the first sign-in.'
+          }
+
       - name: Keep session alive
         shell: pwsh
         run: |
