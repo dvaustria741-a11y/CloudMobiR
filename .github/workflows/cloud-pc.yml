@@ -54,8 +54,8 @@ jobs:
       ROBLOX_PLAYER_URL: https://www.roblox.com/download/client
       # Verified by me: mmozeiko/build-mesa release 26.3.0 asset lists opengl32.dll (statically linked llvmpipe, software OpenGL). Not run on this runner.
       MESA_LLVMPIPE_URL: https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/mesa-llvmpipe-x64-26.3.0.7z
-      # Official x64 Claude Desktop MSIX, redirect URL from Anthropic's Intune deployment README (found by web search, not tested by me on this runner). Empty would mean not set.
-      CLAUDE_MSIX_URL: https://claude.ai/api/desktop/win32/x64/msix/latest/redirect
+      # Claude Desktop Windows x64 installer (redirects to the signed setup .exe). URL given by the user; not fetched by me, my sandbox cannot reach claude.ai. The step checks that the download is a signed PE file.
+      CLAUDE_SETUP_URL: https://claude.ai/api/desktop/win32/x64/setup/latest/redirect
     steps:
       - uses: actions/checkout@v4
 
@@ -311,24 +311,27 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          $url = $env:CLAUDE_MSIX_URL
-          if ([string]::IsNullOrWhiteSpace($url)) {
-            # Unset on purpose: no verified MSIX URL was given. Fall back to winget (id unverified by me).
-            if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'CLAUDE_MSIX_URL is unset and winget is not available. Set CLAUDE_MSIX_URL in the workflow env.' }
-            winget install --id Anthropic.Claude -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-            if ($LASTEXITCODE -ne 0) { throw "winget install Anthropic.Claude exited with code $LASTEXITCODE." }
-            return
+          $setup = Join-Path $env:TEMP 'Claude-Setup.exe'
+          # A browser User-Agent: the default PowerShell one can get an HTML block page instead of the file.
+          $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+          $resp = Invoke-WebRequest -Uri $env:CLAUDE_SETUP_URL -OutFile $setup -UserAgent $ua -MaximumRedirection 10 -UseBasicParsing -PassThru
+          Write-Host "Final URL: $($resp.BaseResponse.ResponseUri)  Content-Type: $($resp.Headers['Content-Type'])"
+          $f = Get-Item $setup
+          $head = [System.IO.File]::ReadAllBytes($setup)[0..1]
+          if ($f.Length -lt 1MB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) {
+            Remove-Item $setup -Force
+            throw "Downloaded file is not a Windows executable ($($f.Length) bytes). Check CLAUDE_SETUP_URL."
           }
-          $msixPath = Join-Path $env:TEMP 'Claude.msix'
-          Invoke-WebRequest -Uri $url -OutFile $msixPath -UseBasicParsing
-          # An MSIX is a zip: reject an HTML page or a stub before provisioning.
-          $f = Get-Item $msixPath
-          $head = [System.IO.File]::ReadAllBytes($msixPath)[0..1]
-          if ($f.Length -lt 1MB -or $head[0] -ne 0x50 -or $head[1] -ne 0x4B) { Remove-Item $msixPath -Force; throw "Downloaded file is not an MSIX package ($($f.Length) bytes). Check CLAUDE_MSIX_URL." }
-          # Provisioned system-wide; it registers for the RDP user at that user's first sign-in.
-          Add-AppxProvisionedPackage -Online -PackagePath $msixPath -SkipLicense | Out-Null
-          Remove-Item $msixPath -Force -ErrorAction SilentlyContinue
-          Write-Host 'Claude Desktop provisioned. It appears after the RDP user signs in.'
+          $sig = Get-AuthenticodeSignature $setup
+          Write-Host "Signature: $($sig.Status), signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { Remove-Item $setup -Force; throw 'The downloaded installer has no valid Authenticode signature.' }
+          # Always leave the real installer on the desktop, so the RDP user can run it as themselves if the silent run below does nothing.
+          Copy-Item $setup 'C:\Users\Public\Desktop\Claude Setup.exe' -Force
+          # The installer's silent switch is not verified by me; the run is bounded and its exit code logged, never fatal.
+          $p = Start-Process -FilePath $setup -ArgumentList '--silent' -PassThru
+          if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force; Write-Host 'Silent install did not finish in 5 minutes and was stopped. Run "Claude Setup" from the desktop.' }
+          else { Write-Host "Installer exited with code $($p.ExitCode). If Claude is missing after sign-in, run 'Claude Setup' from the desktop." }
+          Remove-Item $setup -Force -ErrorAction SilentlyContinue
 
       - name: Keep session alive
         shell: pwsh
