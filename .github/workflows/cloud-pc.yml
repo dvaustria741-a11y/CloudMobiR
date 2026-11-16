@@ -54,8 +54,10 @@ jobs:
       ROBLOX_PLAYER_URL: https://www.roblox.com/download/client
       # Verified by me: mmozeiko/build-mesa release 26.3.0 asset lists opengl32.dll (statically linked llvmpipe, software OpenGL). Not run on this runner.
       MESA_LLVMPIPE_URL: https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/mesa-llvmpipe-x64-26.3.0.7z
-      # Claude Desktop Windows x64 installer (redirects to the signed setup .exe). URL given by the user; not fetched by me, my sandbox cannot reach claude.ai. The step checks that the download is a signed PE file.
-      CLAUDE_SETUP_URL: https://claude.ai/api/desktop/win32/x64/setup/latest/redirect
+      # Claude Desktop Windows x64 installer. Both claude.ai URLs below answer with a Cloudflare managed challenge (cf-mitigated: challenge, HTTP 403) to a non-browser client; I confirmed that from my sandbox for both. The step therefore tries each URL in order and checks that the download is a signed PE file. CLAUDE_SETUP_DIRECT_URL (repository variable, optional) is for the final file URL that the redirect leads to, copied from a browser's download list; it is not a Cloudflare-challenged page if it points at the file host.
+      CLAUDE_SETUP_URL: https://claude.ai/redirect/claudedotcom.v1.384c5e80-7869-453e-948e-2fb22c0206ae/api/desktop/win32/x64/setup/latest/redirect
+      CLAUDE_SETUP_URL_FALLBACK: https://claude.ai/api/desktop/win32/x64/setup/latest/redirect
+      CLAUDE_SETUP_DIRECT_URL: ${{ vars.CLAUDE_SETUP_DIRECT_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -312,26 +314,50 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           $setup = Join-Path $env:TEMP 'Claude-Setup.exe'
-          # A browser User-Agent: the default PowerShell one can get an HTML block page instead of the file.
           $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
-          $resp = Invoke-WebRequest -Uri $env:CLAUDE_SETUP_URL -OutFile $setup -UserAgent $ua -MaximumRedirection 10 -UseBasicParsing -PassThru
-          Write-Host "Final URL: $($resp.BaseResponse.ResponseUri)  Content-Type: $($resp.Headers['Content-Type'])"
-          $f = Get-Item $setup
-          $head = [System.IO.File]::ReadAllBytes($setup)[0..1]
-          if ($f.Length -lt 1MB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) {
-            Remove-Item $setup -Force
-            throw "Downloaded file is not a Windows executable ($($f.Length) bytes). Check CLAUDE_SETUP_URL."
+          # The direct file URL first (no challenge page in front of it), then the two claude.ai redirects.
+          $urls = @($env:CLAUDE_SETUP_DIRECT_URL, $env:CLAUDE_SETUP_URL, $env:CLAUDE_SETUP_URL_FALLBACK) | Where-Object { $_ -and $_.Trim() }
+          $ok = $false
+          foreach ($u in $urls) {
+            Remove-Item $setup -Force -ErrorAction SilentlyContinue
+            try {
+              $resp = Invoke-WebRequest -Uri $u -OutFile $setup -UserAgent $ua -MaximumRedirection 10 -UseBasicParsing -PassThru
+              Write-Host "Fetched $u -> $($resp.BaseResponse.ResponseUri)  Content-Type: $($resp.Headers['Content-Type'])"
+            } catch {
+              $status = ''
+              $mitigated = ''
+              if ($_.Exception.Response) {
+                $status = [int]$_.Exception.Response.StatusCode
+                $mitigated = $_.Exception.Response.Headers['cf-mitigated']
+              }
+              Write-Host "Skipped $u : HTTP '$status' cf-mitigated '$mitigated'. A Cloudflare challenge cannot be passed from this runner."
+              continue
+            }
+            if (-not (Test-Path $setup)) { Write-Host "No file written for $u"; continue }
+            $f = Get-Item $setup
+            $head = [System.IO.File]::ReadAllBytes($setup)[0..1]
+            if ($f.Length -lt 1MB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) {
+              Write-Host "Skipped $u : the download is not a Windows executable ($($f.Length) bytes)."
+              continue
+            }
+            $sig = Get-AuthenticodeSignature $setup
+            Write-Host "Signature: $($sig.Status), signer: $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { Write-Host "Skipped $u : no valid Authenticode signature."; continue }
+            $ok = $true
+            break
           }
-          $sig = Get-AuthenticodeSignature $setup
-          Write-Host "Signature: $($sig.Status), signer: $($sig.SignerCertificate.Subject)"
-          if ($sig.Status -ne 'Valid') { Remove-Item $setup -Force; throw 'The downloaded installer has no valid Authenticode signature.' }
-          # Always leave the real installer on the desktop, so the RDP user can run it as themselves if the silent run below does nothing.
-          Copy-Item $setup 'C:\Users\Public\Desktop\Claude Setup.exe' -Force
-          # The installer's silent switch is not verified by me; the run is bounded and its exit code logged, never fatal.
-          $p = Start-Process -FilePath $setup -ArgumentList '--silent' -PassThru
-          if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force; Write-Host 'Silent install did not finish in 5 minutes and was stopped. Run "Claude Setup" from the desktop.' }
-          else { Write-Host "Installer exited with code $($p.ExitCode). If Claude is missing after sign-in, run 'Claude Setup' from the desktop." }
-          Remove-Item $setup -Force -ErrorAction SilentlyContinue
+          if ($ok) {
+            # Always leave the real installer on the desktop, so the RDP user can run it as themselves if the silent run below does nothing.
+            Copy-Item $setup 'C:\Users\Public\Desktop\Claude Setup.exe' -Force
+            # The installer's silent switch is not verified by me; the run is bounded and its exit code logged, never fatal.
+            $p = Start-Process -FilePath $setup -ArgumentList '--silent' -PassThru
+            if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force; Write-Host 'Silent install did not finish in 5 minutes and was stopped. Run "Claude Setup" from the desktop.' }
+            else { Write-Host "Installer exited with code $($p.ExitCode). If Claude is missing after sign-in, run 'Claude Setup' from the desktop." }
+            Remove-Item $setup -Force -ErrorAction SilentlyContinue
+          } else {
+            Write-Host 'No Claude installer could be downloaded. Set the repository variable CLAUDE_SETUP_DIRECT_URL to the file URL, or use the "Download Claude Desktop" shortcut on the desktop.'
+            throw 'Claude Desktop download failed.'
+          }
 
       - name: Keep session alive
         shell: pwsh
