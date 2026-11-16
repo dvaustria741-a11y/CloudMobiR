@@ -663,6 +663,7 @@ jobs:
           @echo off
           set /p FREELLMAPI_API_KEY=Paste the unified API key from the FreeLLMAPI Keys page and press Enter: 
           set FREELLMAPI_URL=$url
+          claude mcp add --scope user Roblox_Studio -- cmd.exe /c "cd /d %LOCALAPPDATA%\Roblox && .\mcp.bat" >nul 2>&1
           npx -y freellmapi launch
           pause
           "@
