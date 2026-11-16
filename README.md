@@ -39,7 +39,7 @@ The run downloads the Windows installer (`CLAUDE_SETUP_URL` in the workflow), ch
 - If you start a new run by hand while an old one is running, the old one is cancelled; wait for its "Save state" step to finish first so the newest files are saved.
 
 ## Performance
-A best-effort step sets the High performance power plan, turns off Defender real-time scanning, and gives new profiles "best performance" visual effects and no wallpaper. These are unverified on the runner. The runner has no GPU, so Roblox Studio renders on the CPU; lowering Studio's own quality settings helps most, and Roblox settings are kept by the saved state.
+A best-effort step sets the High performance power plan, turns off Defender real-time scanning, gives new profiles "best performance" visual effects and no wallpaper, removes the RDP wallpaper by policy, sets process priorities (Roblox Studio above normal, Blender below normal so the desktop stays responsive during renders), caps Mesa llvmpipe threads one below the CPU count, and turns off a few background services (WSearch, SysMain, DiagTrack, wuauserv, UsoSvc). Each tweak is isolated, so a failure of one does not stop the others or the job, and the job summary lists what applied and what failed. These are unverified on the runner. The runner has no GPU, so Roblox Studio renders on the CPU; lowering Studio's own quality settings helps most, and Roblox settings are kept by the saved state.
 
 ## Options
 - `performance_tweaks` (default on): turn it off to skip the performance tweaks step.

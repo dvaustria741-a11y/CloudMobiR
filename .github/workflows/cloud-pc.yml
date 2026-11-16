@@ -12,7 +12,7 @@ on:
         required: true
         default: cloudpc
       performance_tweaks:
-        description: Apply the performance tweaks (High performance power plan, Defender real-time scanning off, lighter visual effects)
+        description: Apply the performance tweaks (High performance power plan, Defender real-time scanning off, lighter visual effects, RDP wallpaper off, process priority for Studio and Blender, idle background services off, Mesa thread cap)
         type: boolean
         required: false
         default: true
@@ -106,25 +106,111 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+          # Every tweak runs through Invoke-Tweak: an error in one is caught, reported, and the next still runs.
+          # None of the tweaks below was run on a runner by me. Each is labelled with how sure I am; the results table in the job summary shows what really applied.
+          $results = [System.Collections.Generic.List[string]]::new()
+          function Invoke-Tweak {
+            param([string]$Name, [scriptblock]$Action)
+            $ErrorActionPreference = 'Stop'
+            try {
+              $note = (& $Action) -join ' '
+              Write-Host "[ok]     $Name $note"
+              $results.Add("| $Name | applied | $note |")
+            } catch {
+              $msg = ($_.Exception.Message -replace '\|', '/') -replace '\r?\n', ' '
+              Write-Host "[failed] $Name : $msg"
+              $results.Add("| $Name | FAILED | $msg |")
+            }
+          }
+
           # Verified GUID of the built-in High performance power plan.
-          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          # Assumption, not verified on this runner: real-time scanning can be switched off here (it competes with Studio for CPU).
-          try { Set-MpPreference -DisableRealtimeMonitoring $true } catch { Write-Host "Defender real-time scanning not changed: $_" }
+          Invoke-Tweak 'High performance power plan' {
+            powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+            if ($LASTEXITCODE -ne 0) { throw "powercfg exited with code $LASTEXITCODE" }
+          }
+
+          # Assumption, not verified on this runner: real-time scanning can be switched off here (it competes with Studio for CPU). Tamper Protection would block it; the readback catches that.
+          Invoke-Tweak 'Defender real-time scanning off' {
+            Set-MpPreference -DisableRealtimeMonitoring $true
+            if (-not (Get-MpPreference).DisableRealtimeMonitoring) { throw 'Set-MpPreference ran, but real-time monitoring is still on (Tamper Protection?).' }
+          }
+
+          # Fairly sure, not verified here: the "Remove remote desktop wallpaper" Group Policy value (TerminalServer.admx, TS_NO_WALLPAPER = fNoRemoteDesktopWallpaper). Read when a session logs on, so it applies to the RDP session you connect with later.
+          Invoke-Tweak 'RDP sessions: no desktop wallpaper (policy fNoRemoteDesktopWallpaper)' {
+            $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+            if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+            Set-ItemProperty -Path $key -Name fNoRemoteDesktopWallpaper -Value 1 -Type DWord -Force
+            if ((Get-ItemProperty -Path $key).fNoRemoteDesktopWallpaper -ne 1) { throw 'readback mismatch' }
+          }
+
           # New profiles are copied from the Default user hive, so set "best performance" visual effects there before the RDP user's profile exists.
-          # Values are the common Windows performance-tuning ones (VisualFXSetting 2, UserPreferencesMask 9012038010000000); not verified on this runner.
-          $hive = 'C:\Users\Default\NTUSER.DAT'
-          $name = 'CloudPcDefault'
-          if (Test-Path "C:\Users\$env:RDP_USERNAME") { Write-Host 'Profile already exists; Default-user visual effects are not applied to it.' }
-          reg load "HKU\$name" $hive | Out-Null
-          if ($LASTEXITCODE -ne 0) { Write-Host 'Could not load the Default user hive; skipping visual effect tweaks.'; return }
-          reg add "HKU\$name\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f | Out-Null
-          reg add "HKU\$name\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9012038010000000 /f | Out-Null
-          reg add "HKU\$name\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f | Out-Null
-          reg add "HKU\$name\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "" /f | Out-Null
-          reg add "HKU\$name\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d 0 /f | Out-Null
-          [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-          for ($i = 0; $i -lt 5; $i++) { reg unload "HKU\$name" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep -Seconds 2 }
-          Write-Host 'Performance tweaks applied.'
+          # Values are the common Windows performance-tuning ones (VisualFXSetting 2, UserPreferencesMask 9012038010000000, DragFullWindows, MinAnimate); not verified on this runner.
+          # Added here, from memory and also unverified: Personalize\EnableTransparency 0 and Explorer\Advanced\TaskbarAnimations 0.
+          Invoke-Tweak 'Best-performance visual effects (Default user profile)' {
+            $hive = 'C:\Users\Default\NTUSER.DAT'
+            $hiveName = 'CloudPcDefault'
+            reg load "HKU\$hiveName" $hive | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'could not load the Default user hive' }
+            try {
+              $writes = @(
+                @('Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects', 'VisualFXSetting', 'REG_DWORD', '2'),
+                @('Control Panel\Desktop', 'UserPreferencesMask', 'REG_BINARY', '9012038010000000'),
+                @('Control Panel\Desktop', 'DragFullWindows', 'REG_SZ', '0'),
+                @('Control Panel\Desktop', 'Wallpaper', 'REG_SZ', ''),
+                @('Control Panel\Desktop\WindowMetrics', 'MinAnimate', 'REG_SZ', '0'),
+                @('Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'EnableTransparency', 'REG_DWORD', '0'),
+                @('Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'TaskbarAnimations', 'REG_DWORD', '0')
+              )
+              foreach ($w in $writes) {
+                reg add "HKU\$hiveName\$($w[0])" /v $w[1] /t $w[2] /d $w[3] /f | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "reg add $($w[1]) failed with code $LASTEXITCODE" }
+              }
+            } finally {
+              [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+              for ($i = 0; $i -lt 5; $i++) { reg unload "HKU\$hiveName" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep -Seconds 2 }
+            }
+            if (Test-Path "C:\Users\$env:RDP_USERNAME") { '(the RDP user profile already exists; it keeps its own settings)' }
+          }
+
+          # Process priority through Image File Execution Options\<exe>\PerfOptions\CpuPriorityClass (1 idle, 2 normal, 3 high, 5 below normal, 6 above normal). I am fairly sure of this mechanism and of those numbers; not verified on this runner.
+          # Studio gets above normal. Blender gets BELOW normal on purpose: a render saturates every core, and at normal or higher priority it competes with the RDP session's own work, so the desktop would stutter during renders; at below normal it still uses all idle CPU.
+          # Assumption: the Studio process is RobloxStudioBeta.exe. If the name is wrong the entry is simply never used. blender.exe is the name this workflow already finds.
+          Invoke-Tweak 'Process priority: Studio above normal, Blender below normal' {
+            $base = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+            $priority = [ordered]@{ 'RobloxStudioBeta.exe' = 6; 'blender.exe' = 5 }
+            foreach ($exe in $priority.Keys) {
+              $k = "$base\$exe\PerfOptions"
+              New-Item -Path $k -Force | Out-Null
+              Set-ItemProperty -Path $k -Name CpuPriorityClass -Value $priority[$exe] -Type DWord -Force
+              if ((Get-ItemProperty -Path $k).CpuPriorityClass -ne $priority[$exe]) { throw "readback mismatch for $exe" }
+            }
+          }
+
+          # Mesa documents LP_NUM_THREADS for llvmpipe's rasteriser thread count. Leaving one CPU free for the RDP session's own work is my assumption of what keeps the desktop responsive while Blender's viewport renders; not verified, and whether this static opengl32.dll build reads it is also unverified. Machine-level, so the RDP session you connect with later inherits it.
+          Invoke-Tweak 'Mesa llvmpipe: leave one CPU free (LP_NUM_THREADS)' {
+            $cpus = [int]$env:NUMBER_OF_PROCESSORS
+            if ($cpus -lt 2) { return "skipped, only $cpus CPU" }
+            [Environment]::SetEnvironmentVariable('LP_NUM_THREADS', [string]($cpus - 1), 'Machine')
+            "LP_NUM_THREADS=$($cpus - 1) of $cpus CPUs"
+          }
+
+          # Background services nothing here needs. Names are the standard Windows ones; whether each exists, or is already off, on windows-2025 is not verified, and a missing one is reported as a failure of that line only.
+          foreach ($svc in 'WSearch', 'SysMain', 'DiagTrack', 'wuauserv', 'UsoSvc') {
+            Invoke-Tweak "Service off: $svc" {
+              $s = Get-Service -Name $svc -ErrorAction Stop
+              if ($s.StartType -eq 'Disabled' -and $s.Status -eq 'Stopped') { return 'already off' }
+              Set-Service -Name $svc -StartupType Disabled
+              if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction Stop; $s.WaitForStatus('Stopped', '00:00:20') }
+            }
+          }
+
+          $failed = @($results | Where-Object { $_ -like '*| FAILED |*' }).Count
+          Write-Host "Performance tweaks finished: $($results.Count - $failed) applied, $failed failed. Failures do not stop the job."
+          $summary = "### Performance tweaks`n`n| Tweak | Result | Detail |`n|---|---|---|`n" + ($results -join "`n") + "`n"
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          # Native commands above can leave a non-zero exit code behind; the tweaks are best effort, so the step itself must not report it.
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Restore saved state
         continue-on-error: true
