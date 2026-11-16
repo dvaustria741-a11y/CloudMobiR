@@ -567,6 +567,109 @@ jobs:
             Write-Host 'Profile not created yet; the config is applied at the first sign-in.'
           }
 
+      - uses: actions/setup-node@v4
+        continue-on-error: true
+        with:
+          node-version: '22'
+
+      - name: Install FreeLLMAPI and the Claude Code launcher
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          # Source: tashfeenahmed/freellmapi README and docs/en/install/01-install.md, read by me. Not run on a runner by me.
+          # Docker is not used: the Windows runner runs Windows containers, so the Linux image would not start. The documented "production build without Docker" path is used instead (npm ci, npm run build, node server/dist/index.js).
+          # Cloned from the default branch, not pinned, so it follows upstream.
+          $shared = 'C:\ProgramData\CloudMobiR'
+          $nodeHome = Join-Path $shared 'node'
+          $appDir = Join-Path $shared 'freellmapi'
+          $npmGlobal = Join-Path $shared 'npm-global'
+          $runCmd = Join-Path $shared 'freellmapi-run.cmd'
+          $logFile = Join-Path $shared 'freellmapi.log'
+          $port = 3001
+          $url = "http://127.0.0.1:$port"
+          New-Item -ItemType Directory -Force -Path $shared, $npmGlobal | Out-Null
+
+          # Copy the Node that setup-node installed into a shared folder: the RDP user cannot rely on the runner account's tool cache.
+          $nodeSource = Split-Path (Get-Command node -ErrorAction Stop).Source
+          if (Test-Path $nodeHome) { Remove-Item $nodeHome -Recurse -Force }
+          Copy-Item $nodeSource $nodeHome -Recurse -Force
+          $nodeExe = Join-Path $nodeHome 'node.exe'
+          if (-not (Test-Path $nodeExe)) { throw "node.exe missing from $nodeHome" }
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $parts = @($machinePath -split ';' | Where-Object { $_ })
+          foreach ($dir in @($nodeHome, $npmGlobal)) { if ($parts -notcontains $dir) { $parts += $dir } }
+          [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'Machine')
+          $env:Path = "$nodeHome;$npmGlobal;$env:Path"
+          Write-Host "Node: $(& $nodeExe --version)"
+
+          if (Test-Path $appDir) { Remove-Item $appDir -Recurse -Force }
+          git clone --depth 1 https://github.com/tashfeenahmed/freellmapi.git $appDir
+          if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+          Push-Location $appDir
+          try {
+            & "$nodeHome\npm.cmd" ci
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
+            & "$nodeHome\npm.cmd" run build
+            if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
+          } finally { Pop-Location }
+          if (-not (Test-Path (Join-Path $appDir 'server\dist\index.js'))) { throw 'server\dist\index.js is missing after the build.' }
+
+          # Encryption key for the stored provider keys, generated per run. The database lives in the repo folder on this runner, so it is wiped when the run ends (it is not part of the saved state).
+          $bytes = New-Object byte[] 32
+          [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $encKey = -join ($bytes | ForEach-Object { '{0:x2}' -f $_ })
+          $runBody = @"
+          @echo off
+          set NODE_ENV=production
+          set PORT=$port
+          set HOST=127.0.0.1
+          set ENCRYPTION_KEY=$encKey
+          cd /d $appDir
+          "$nodeExe" server\dist\index.js >> "$logFile" 2>&1
+          "@
+          Set-Content -Path $runCmd -Value $runBody -Encoding ascii
+
+          # A scheduled task running as SYSTEM, so the server outlives this step and the RDP sign-in.
+          Get-ScheduledTask -TaskName 'FreeLLMAPI' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+          $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c $runCmd"
+          $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+          $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+          Register-ScheduledTask -TaskName 'FreeLLMAPI' -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+          Start-ScheduledTask -TaskName 'FreeLLMAPI'
+
+          $up = $false
+          for ($i = 0; $i -lt 60 -and -not $up; $i++) {
+            try { $null = Invoke-WebRequest -Uri "$url/" -UseBasicParsing -TimeoutSec 3; $up = $true }
+            catch { if ($_.Exception.Response) { $up = $true } else { Start-Sleep -Seconds 2 } }
+          }
+          if (-not $up) {
+            if (Test-Path $logFile) { Get-Content $logFile -Tail 40 | ForEach-Object { Write-Host $_ } }
+            throw "FreeLLMAPI did not answer on $url within 2 minutes."
+          }
+          Write-Host "FreeLLMAPI answers on $url"
+
+          $desktop = 'C:\Users\Public\Desktop'
+          Set-Content -Path (Join-Path $desktop 'FreeLLMAPI Dashboard.url') -Value "[InternetShortcut]`r`nURL=$url" -Encoding ascii
+
+          # Claude Code, installed into a shared prefix so the RDP user finds it on PATH. Package name @anthropic-ai/claude-code is from memory, not verified on this runner.
+          & "$nodeHome\npm.cmd" install -g '@anthropic-ai/claude-code' --prefix $npmGlobal
+          if ($LASTEXITCODE -ne 0) { Write-Host "Claude Code install failed with exit code $LASTEXITCODE; the launcher below still works if you install it later." }
+
+          # The unified key only exists after the first dashboard sign-up, so the launcher asks for it (paste it; typing over RDP gets scrambled).
+          # `freellmapi launch` and FREELLMAPI_URL / FREELLMAPI_API_KEY are from docs/en/cli/01-generators.md and cli/src/index.ts, read by me.
+          $launcher = @"
+          @echo off
+          set /p FREELLMAPI_API_KEY=Paste the unified API key from the FreeLLMAPI Keys page and press Enter: 
+          set FREELLMAPI_URL=$url
+          npx -y freellmapi launch
+          pause
+          "@
+          Set-Content -Path (Join-Path $desktop 'Claude Code via FreeLLMAPI.cmd') -Value $launcher -Encoding ascii
+
+          "### FreeLLMAPI`n`nDashboard on the cloud PC: ``$url`` (shortcut on the desktop). Create the first account there, add provider keys on the Keys page, copy the unified key, then use ``Claude Code via FreeLLMAPI`` on the desktop. Server log: ``$logFile``.`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
       - name: Keep session alive
         shell: pwsh
         run: |
