@@ -57,7 +57,8 @@ jobs:
       # Claude Desktop Windows x64 installer. Both claude.ai URLs below answer with a Cloudflare managed challenge (cf-mitigated: challenge, HTTP 403) to a non-browser client; I confirmed that from my sandbox for both. The step therefore tries each URL in order and checks that the download is a signed PE file. CLAUDE_SETUP_DIRECT_URL (repository variable, optional) is for the final file URL that the redirect leads to, copied from a browser's download list; it is not a Cloudflare-challenged page if it points at the file host.
       CLAUDE_SETUP_URL: https://claude.ai/redirect/claudedotcom.v1.384c5e80-7869-453e-948e-2fb22c0206ae/api/desktop/win32/x64/setup/latest/redirect
       CLAUDE_SETUP_URL_FALLBACK: https://claude.ai/api/desktop/win32/x64/setup/latest/redirect
-      CLAUDE_SETUP_DIRECT_URL: ${{ secrets.CLAUDE_SETUP_DIRECT_URL || vars.CLAUDE_SETUP_DIRECT_URL }}
+      # Default: the x64 per-user EXE of version 3.6556.2 on downloads.claude.ai, taken from the winget manifest listing for Anthropic.Claude (wingetly.io/apps/anthropic/claude); it is pinned, so it goes stale when Anthropic ships a newer build. Not fetched by me; the step checks the download is a signed PE file and falls back to the claude.ai redirects and then winget. A secret or variable with this name overrides it.
+      CLAUDE_SETUP_DIRECT_URL: ${{ secrets.CLAUDE_SETUP_DIRECT_URL || vars.CLAUDE_SETUP_DIRECT_URL || 'https://downloads.claude.ai/releases/win32/x64/3.6556.2/Claude-20c019a1e61fa5b687616af57d31f97bb3181723.exe' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -355,8 +356,15 @@ jobs:
             else { Write-Host "Installer exited with code $($p.ExitCode). If Claude is missing after sign-in, run 'Claude Setup' from the desktop." }
             Remove-Item $setup -Force -ErrorAction SilentlyContinue
           } else {
-            Write-Host 'No Claude installer could be downloaded. Set the repository variable CLAUDE_SETUP_DIRECT_URL to the file URL, or use the "Download Claude Desktop" shortcut on the desktop.'
-            throw 'Claude Desktop download failed.'
+            Write-Host 'No Claude installer URL worked. Trying winget (package id Anthropic.Claude, from the winget manifest listing; not verified on this runner).'
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+              & winget install --id Anthropic.Claude --exact --silent --accept-package-agreements --accept-source-agreements
+              Write-Host "winget exited with code $LASTEXITCODE"
+              if ($LASTEXITCODE -ne 0) { throw 'Claude Desktop winget install failed.' }
+            } else {
+              Write-Host 'winget is not available on this runner. Use the "Download Claude Desktop" shortcut on the desktop, or set CLAUDE_SETUP_DIRECT_URL to a newer file URL.'
+              throw 'Claude Desktop download failed.'
+            }
           }
 
       - name: Keep session alive
