@@ -57,7 +57,7 @@ jobs:
       # Claude Desktop Windows x64 installer. Both claude.ai URLs below answer with a Cloudflare managed challenge (cf-mitigated: challenge, HTTP 403) to a non-browser client; I confirmed that from my sandbox for both. The step therefore tries each URL in order and checks that the download is a signed PE file. CLAUDE_SETUP_DIRECT_URL (repository variable, optional) is for the final file URL that the redirect leads to, copied from a browser's download list; it is not a Cloudflare-challenged page if it points at the file host.
       CLAUDE_SETUP_URL: https://claude.ai/redirect/claudedotcom.v1.384c5e80-7869-453e-948e-2fb22c0206ae/api/desktop/win32/x64/setup/latest/redirect
       CLAUDE_SETUP_URL_FALLBACK: https://claude.ai/api/desktop/win32/x64/setup/latest/redirect
-      CLAUDE_SETUP_DIRECT_URL: ${{ vars.CLAUDE_SETUP_DIRECT_URL }}
+      CLAUDE_SETUP_DIRECT_URL: ${{ secrets.CLAUDE_SETUP_DIRECT_URL || vars.CLAUDE_SETUP_DIRECT_URL }}
     steps:
       - uses: actions/checkout@v4
 
