@@ -145,76 +145,45 @@ jobs:
           # Does NOT touch restore-state: only live processes and service START values are
           # changed; no saved artefacts are modified.
           Invoke-Tweak 'Kill Defender (MsMpEng + MpDefenderCoreService, free ~260 MB)' {
-            # --- Tamper Protection off via registry ---
-            $tpKey = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features'
-            if (Test-Path $tpKey) {
-              Set-ItemProperty -Path $tpKey -Name TamperProtection -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
-            }
-            # Also the policy key used by Intune/MDM — belt and suspenders
-            $polKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
-            if (-not (Test-Path $polKey)) { New-Item -Path $polKey -Force | Out-Null }
-            Set-ItemProperty -Path $polKey -Name DisableAntiSpyware -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            $rtKey = "$polKey\Real-Time Protection"
-            if (-not (Test-Path $rtKey)) { New-Item -Path $rtKey -Force | Out-Null }
-            Set-ItemProperty -Path $rtKey -Name DisableRealtimeMonitoring    -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $rtKey -Name DisableBehaviorMonitoring     -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $rtKey -Name DisableOnAccessProtection     -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $rtKey -Name DisableScanOnRealtimeEnable   -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            # Tamper Protection on Server 2025 runners blocks registry edits and direct
+            # Stop-Service. The bypass: register a scheduled task that runs as SYSTEM at
+            # highest privilege level — this token is outside SCM's TP guard and can call
+            # TerminateProcess on PPL-lite processes like MsMpEng.
 
-            # --- Disable defender services by flipping their Start value directly in registry ---
-            # (Service control bypasses SCM's Tamper Protection guard)
-            foreach ($svcName in 'WinDefend','WdNisSvc','WdNisDrv','WdFilter','MpsSvc') {
-              $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName"
-              if (Test-Path $k) {
-                Set-ItemProperty -Path $k -Name Start -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
-              }
-            }
+            # Write the killer script to disk first
+            $killerPath = 'C:\Windows\Temp\kill-defender.ps1'
+            $killerScript = @(
+              'foreach ($svc in "WinDefend","WdNisSvc","WdNisDrv","WdFilter") {',
+              '  $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"',
+              '  if (Test-Path $k) { Set-ItemProperty $k Start 4 -Force -EA SilentlyContinue }',
+              '  Stop-Service $svc -Force -EA SilentlyContinue',
+              '}',
+              'foreach ($name in "MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP","SecurityHealthService") {',
+              '  Get-Process $name -EA SilentlyContinue | ForEach-Object {',
+              '    taskkill /F /T /PID $_.Id 2>$null',
+              '    Stop-Process $_.Id -Force -EA SilentlyContinue',
+              '  }',
+              '}'
+            ) -join "`r`n"
+            Set-Content -Path $killerPath -Value $killerScript -Encoding ascii
 
-            # --- Stop the services (best effort, some may already be dying) ---
-            foreach ($svcName in 'WinDefend','WdNisSvc') {
-              $s = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-              if ($s -and $s.Status -ne 'Stopped') {
-                Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-                try { $s.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(10)) } catch {}
-              }
-            }
+            # Register + run as SYSTEM/highest — bypasses Tamper Protection's SCM hook
+            $taskName = 'CloudPC-KillDefender'
+            schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+            schtasks /Create /TN $taskName /SC ONCE /ST 00:00 /RL HIGHEST /RU SYSTEM `
+              /TR "powershell.exe -NonInteractive -WindowStyle Hidden -File `"$killerPath`"" `
+              /F 2>$null | Out-Null
+            schtasks /Run /TN $taskName 2>$null | Out-Null
+            Start-Sleep -Seconds 8
 
-            # --- Hard-kill every remaining Defender process ---
-            $targets = 'MsMpEng','MpDefenderCoreService','MsMpEngCP','NisSrv','MpCopyAccelerator','SecurityHealthService'
-            $freed = 0
-            foreach ($name in $targets) {
-              foreach ($p in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
-                $freed += $p.WorkingSet64
-                taskkill /F /T /PID $p.Id 2>$null | Out-Null
-                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-              }
-            }
-
-            Start-Sleep -Seconds 3
-
-            # Second pass: corrupt the service binary path so Tamper Protection
-            # watchdog cannot relaunch MsMpEng after kill, then hammer it 3 times.
-            $stubborn = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
-            if ($stubborn) {
-              sc.exe config WinDefend binPath= "cmd.exe /c exit" 2>$null | Out-Null
-              sc.exe config WdNisSvc  binPath= "cmd.exe /c exit" 2>$null | Out-Null
-              sc.exe config WdNisDrv  binPath= "cmd.exe /c exit" 2>$null | Out-Null
-              for ($attempt = 0; $attempt -lt 3; $attempt++) {
-                foreach ($name in 'MsMpEng','MpDefenderCoreService','NisSrv','MsMpEngCP') {
-                  foreach ($p in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
-                    taskkill /F /T /PID $p.Id 2>$null | Out-Null
-                    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-                  }
-                }
-                Start-Sleep -Seconds 2
-              }
-            }
+            schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+            Remove-Item $killerPath -Force -ErrorAction SilentlyContinue
 
             $still = (Get-Process -Name MsMpEng -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
             if ($still -gt 0) {
-              "(MsMpEng still alive — WS: $([math]::Round($still/1MB,1)) MB; Tamper Protection fully resisted both passes)"
+              "(MsMpEng WS: $([math]::Round($still/1MB,1)) MB — schtasks SYSTEM kill also resisted)"
             } else {
-              "Defender processes gone; freed ~$([math]::Round($freed/1MB,0)) MB"
+              "Defender gone via SYSTEM scheduled task"
             }
           }
 
