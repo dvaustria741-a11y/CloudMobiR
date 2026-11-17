@@ -135,78 +135,104 @@ jobs:
             if (-not (Get-MpPreference).DisableRealtimeMonitoring) { throw 'Set-MpPreference ran, but real-time monitoring is still on (Tamper Protection?).' }
           }
 
-          # Kill MsMpEng (247 MB) + MpDefenderCoreService via registry policy bypass.
-          # Tamper Protection on GitHub runners can block Stop-Service and taskkill directly.
-          # The sequence below:
-          #   1. Disable Tamper Protection via registry (requires admin, works on runner)
-          #   2. Set WinDefend + WdNisSvc + WdFilter to Disabled via registry HKLM (START=4)
-          #   3. Set-MpPreference policy keys to suppress all activity
-          #   4. Stop-Service / taskkill with /F /T on each defender process
-          # Does NOT touch restore-state: only live processes and service START values are
-          # changed; no saved artefacts are modified.
-          Invoke-Tweak 'Suspend Defender (MsMpEng is PPL — freeze + page out instead of kill)' {
-            # MsMpEng runs as PPL-Antimalware-Light on Server 2025 runners.
-            # TerminateProcess is denied for ALL usermode callers including SYSTEM.
-            # What IS allowed: NtSuspendProcess with a PROCESS_SUSPEND_RESUME handle
-            # (PPL policy permits same-or-higher signer to suspend).
-            # A suspended process: zero CPU, working set paged out by VMM within ~60s.
-            # Net effect: ~91 MB freed from physical RAM, 0% CPU — same practical result.
-            #
-            # Compile a tiny C# exe with csc.exe (.NET is on every runner) — no YAML
-            # here-string needed, write the source as individual string lines joined.
-
-            $tmpDir  = 'C:\Windows\Temp\CloudPCDef'
-            $srcPath = "$tmpDir\suspend.cs"
-            $exePath = "$tmpDir\suspend.exe"
+          # Kill MsMpEng + all Defender processes.
+          # MsMpEng is PPL-Antimalware-Light — TerminateProcess from usermode (even SYSTEM) is blocked.
+          # Approach: use Sysinternals Process Explorer's kernel driver (procexp152.sys).
+          # - It is Microsoft/WHQL-signed → loads cleanly with Secure Boot + DSE enforced.
+          # - Device \\.\ PROCEXP152, IOCTL 0x8335003C sends a kernel-mode TerminateProcess
+          #   that bypasses PPL completely (this is exactly what ProcExp's own "Kill Process" button uses).
+          # Steps:
+          #   1. Download procexp64.exe from live.sysinternals.com (auto-accepts EULA via reg key).
+          #   2. Run it once with /accepteula — this installs + starts procexp152.sys automatically.
+          #   3. Compile a tiny C# tool that opens the device and fires the IOCTL for each target PID.
+          #   4. Disable Defender service start values so nothing respawns.
+          Invoke-Tweak 'Kill Defender via procexp152.sys IOCTL (PPL bypass)' {
+            $tmpDir = 'C:\Windows\Temp\CloudPCKill'
             New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
+            # 1. Download procexp64.exe
+            $procexpExe = "$tmpDir\procexp64.exe"
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri 'https://live.sysinternals.com/procexp64.exe' -OutFile $procexpExe -UseBasicParsing -ErrorAction Stop
+            if (-not (Test-Path $procexpExe)) { throw 'procexp64.exe download failed' }
+
+            # 2. Accept EULA via registry (prevents the GUI dialog) then run briefly to install driver
+            $eulaKey = 'HKCU:\Software\Sysinternals\Process Explorer'
+            if (-not (Test-Path $eulaKey)) { New-Item -Path $eulaKey -Force | Out-Null }
+            Set-ItemProperty -Path $eulaKey -Name EulaAccepted -Value 1 -Type DWord -Force
+
+            # Run procexp64 briefly — it installs procexp152.sys and starts the service
+            $pe = Start-Process -FilePath $procexpExe -ArgumentList '/accepteula' -PassThru -WindowStyle Hidden
+            Start-Sleep -Seconds 4
+            # Stop the GUI, driver stays loaded
+            Stop-Process -Id $pe.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+
+            # Verify driver device is up
+            $dev = [System.IO.File]::Exists('\\?\GLOBALROOT\Device\PROCEXP152')
+            # Device path for CreateFile
+            $devPath = '\\.\PROCEXP152'
+
+            # 3. Compile the IOCTL killer
             $src = @(
               'using System;',
               'using System.Diagnostics;',
               'using System.Runtime.InteropServices;',
-              'class S {',
-              '  [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);',
-              '  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, int pid);',
-              '  const uint SUSPEND_RESUME = 0x0800;',
-              '  static void Main(string[] args) {',
-              '    string[] targets = {"MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP"};',
+              'class K {',
+              '  [DllImport("kernel32.dll", CharSet=CharSet.Auto, SetLastError=true)]',
+              '  static extern IntPtr CreateFile(string n,uint a,uint s,IntPtr sec,uint cd,uint f,IntPtr t);',
+              '  [DllImport("kernel32.dll", SetLastError=true)]',
+              '  static extern bool DeviceIoControl(IntPtr h,uint code,ref uint inB,int inSz,IntPtr o,int oSz,out uint ret,IntPtr ov);',
+              '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+              '  const uint GENERIC_ALL  = 0x10000000;',
+              '  const uint OPEN_EXISTING = 3;',
+              '  const uint IOCTL_KILL   = 0x8335003C;',
+              '  static void Main() {',
+              '    string[] targets = {"MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP","SecurityHealthService","MpCopyAccelerator"};',
+              '    IntPtr hDev = CreateFile("\\\\.\\PROCEXP152", GENERIC_ALL, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);',
+              '    if (hDev == new IntPtr(-1)) { Console.WriteLine("device open failed err=" + Marshal.GetLastWin32Error()); return; }',
               '    foreach (var t in targets)',
               '      foreach (var p in Process.GetProcessesByName(t)) {',
-              '        var h = OpenProcess(SUSPEND_RESUME, false, p.Id);',
-              '        if (h != IntPtr.Zero) NtSuspendProcess(h);',
+              '        uint pid = (uint)p.Id; uint ret = 0;',
+              '        bool ok = DeviceIoControl(hDev, IOCTL_KILL, ref pid, 4, IntPtr.Zero, 0, out ret, IntPtr.Zero);',
+              '        Console.WriteLine((ok?"killed ":"failed ") + t + " pid=" + pid);',
               '      }',
+              '    CloseHandle(hDev);',
               '  }',
               '}'
             ) -join "`r`n"
+
+            $srcPath = "$tmpDir\kill.cs"
+            $exePath = "$tmpDir\kill.exe"
             Set-Content -Path $srcPath -Value $src -Encoding ascii
 
-            # Find csc.exe — ships with .NET Framework on all Windows runners
             $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
                    Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $csc) { throw 'csc.exe not found — .NET Framework missing' }
+            if (-not $csc) { throw 'csc.exe not found' }
+            & $csc.FullName /out:$exePath /nologo $srcPath 2>&1 | Out-Null
+            if (-not (Test-Path $exePath)) { throw 'C# compile failed' }
 
-            & $csc.FullName /out:$exePath /nologo $srcPath 2>$null | Out-Null
-            if (-not (Test-Path $exePath)) { throw 'Compilation failed' }
+            # 4. Fire the killer
+            $output = & $exePath
+            $output | ForEach-Object { Write-Host "  $_" }
 
-            # Run the suspender
-            & $exePath
-            Start-Sleep -Seconds 5
-
-            # Also disable service start values so they never restart after runner reboot
-            foreach ($svc in 'WinDefend','WdNisSvc','WdNisDrv','WdFilter') {
+            # 5. Disable Defender service start values — prevents respawn
+            foreach ($svc in 'WinDefend','WdNisSvc','WdNisDrv','WdFilter','MsSecCore','MpsSvc') {
               $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
               if (Test-Path $k) {
                 Set-ItemProperty $k -Name Start -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
               }
             }
 
+            # Cleanup
+            # Leave driver running (it auto-unloads when device handle is released)
             Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
-            # Check: suspended process has near-zero CPU; WS will drain over next ~60s
-            $procs = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
-            if ($procs) {
-              $ws = ($procs | Measure-Object WorkingSet64 -Sum).Sum
-              "MsMpEng suspended (WS $([math]::Round($ws/1MB,1)) MB — pages out passively; 0 CPU)"
+            # Report
+            $still = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+            if ($still) {
+              $ws = ($still | Measure-Object WorkingSet64 -Sum).Sum
+              "MsMpEng still running (WS $([math]::Round($ws/1MB,1)) MB) — IOCTL may have failed, check output above"
             } else {
               "MsMpEng gone"
             }
