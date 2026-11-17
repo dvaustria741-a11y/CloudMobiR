@@ -313,6 +313,37 @@ jobs:
             if (Get-Process -Name TiWorker -ErrorAction SilentlyContinue) { 'still running' } else { 'gone' }
           }
 
+          # Additional services still visible in Process Explorer after the initial tweaks.
+          # docker: Docker daemon — not needed on a Cloud PC / RDP session
+          # WslService: WSL — not needed
+          # vmcompute: Hyper-V host compute service (different from vmms which is VM Management)
+          # SecurityHealthService: Windows Security health dashboard — Defender is already suspended
+          foreach ($svc in 'docker','WslService','vmcompute','SecurityHealthService') {
+            Invoke-Tweak "Service off: $svc" {
+              $s = Get-Service -Name $svc -ErrorAction Stop
+              if ($s.StartType -eq 'Disabled' -and $s.Status -eq 'Stopped') { return 'already off' }
+              Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+              if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue; try { $s.WaitForStatus('Stopped', '00:00:15') } catch {} }
+              'stopped'
+            }
+          }
+
+          # Direct process kills for processes that linger after their service is stopped.
+          # WaAppAgent.exe: Azure guest agent worker (service stopped above but process can outlive it)
+          # dockerd.exe: Docker daemon process
+          # wslservice.exe: WSL service process
+          Invoke-Tweak 'Kill lingering agent/daemon processes' {
+            $targets = 'WaAppAgent','dockerd','wslservice','vmcompute'
+            $killed = @()
+            foreach ($name in $targets) {
+              foreach ($p in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                $killed += $name
+              }
+            }
+            if ($killed.Count -gt 0) { "killed: $($killed -join ', ')" } else { 'none running' }
+          }
+
           $failed = @($results | Where-Object { $_ -like '*| FAILED |*' }).Count
           Write-Host "Performance tweaks finished: $($results.Count - $failed) applied, $failed failed. Failures do not stop the job."
           $summary = "### Performance tweaks`n`n| Tweak | Result | Detail |`n|---|---|---|`n" + ($results -join "`n") + "`n"
