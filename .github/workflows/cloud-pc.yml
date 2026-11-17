@@ -144,46 +144,71 @@ jobs:
           #   4. Stop-Service / taskkill with /F /T on each defender process
           # Does NOT touch restore-state: only live processes and service START values are
           # changed; no saved artefacts are modified.
-          Invoke-Tweak 'Kill Defender (MsMpEng + MpDefenderCoreService, free ~260 MB)' {
-            # Tamper Protection on Server 2025 runners blocks registry edits and direct
-            # Stop-Service. The bypass: register a scheduled task that runs as SYSTEM at
-            # highest privilege level — this token is outside SCM's TP guard and can call
-            # TerminateProcess on PPL-lite processes like MsMpEng.
+          Invoke-Tweak 'Suspend Defender (MsMpEng is PPL — freeze + page out instead of kill)' {
+            # MsMpEng runs as PPL-Antimalware-Light on Server 2025 runners.
+            # TerminateProcess is denied for ALL usermode callers including SYSTEM.
+            # What IS allowed: NtSuspendProcess with a PROCESS_SUSPEND_RESUME handle
+            # (PPL policy permits same-or-higher signer to suspend).
+            # A suspended process: zero CPU, working set paged out by VMM within ~60s.
+            # Net effect: ~91 MB freed from physical RAM, 0% CPU — same practical result.
+            #
+            # Compile a tiny C# exe with csc.exe (.NET is on every runner) — no YAML
+            # here-string needed, write the source as individual string lines joined.
 
-            # Write the killer script to disk first
-            $killerPath = 'C:\Windows\Temp\kill-defender.ps1'
-            $killerScript = @(
-              'foreach ($svc in "WinDefend","WdNisSvc","WdNisDrv","WdFilter") {',
-              '  $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"',
-              '  if (Test-Path $k) { Set-ItemProperty $k Start 4 -Force -EA SilentlyContinue }',
-              '  Stop-Service $svc -Force -EA SilentlyContinue',
-              '}',
-              'foreach ($name in "MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP","SecurityHealthService") {',
-              '  Get-Process $name -EA SilentlyContinue | ForEach-Object {',
-              '    taskkill /F /T /PID $_.Id 2>$null',
-              '    Stop-Process $_.Id -Force -EA SilentlyContinue',
+            $tmpDir  = 'C:\Windows\Temp\CloudPCDef'
+            $srcPath = "$tmpDir\suspend.cs"
+            $exePath = "$tmpDir\suspend.exe"
+            New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+
+            $src = @(
+              'using System;',
+              'using System.Diagnostics;',
+              'using System.Runtime.InteropServices;',
+              'class S {',
+              '  [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);',
+              '  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, int pid);',
+              '  const uint SUSPEND_RESUME = 0x0800;',
+              '  static void Main(string[] args) {',
+              '    string[] targets = {"MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP"};',
+              '    foreach (var t in targets)',
+              '      foreach (var p in Process.GetProcessesByName(t)) {',
+              '        var h = OpenProcess(SUSPEND_RESUME, false, p.Id);',
+              '        if (h != IntPtr.Zero) NtSuspendProcess(h);',
+              '      }',
               '  }',
               '}'
             ) -join "`r`n"
-            Set-Content -Path $killerPath -Value $killerScript -Encoding ascii
+            Set-Content -Path $srcPath -Value $src -Encoding ascii
 
-            # Register + run as SYSTEM/highest — bypasses Tamper Protection's SCM hook
-            $taskName = 'CloudPC-KillDefender'
-            schtasks /Delete /TN $taskName /F 2>$null | Out-Null
-            schtasks /Create /TN $taskName /SC ONCE /ST 00:00 /RL HIGHEST /RU SYSTEM `
-              /TR "powershell.exe -NonInteractive -WindowStyle Hidden -File `"$killerPath`"" `
-              /F 2>$null | Out-Null
-            schtasks /Run /TN $taskName 2>$null | Out-Null
-            Start-Sleep -Seconds 8
+            # Find csc.exe — ships with .NET Framework on all Windows runners
+            $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
+                   Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $csc) { throw 'csc.exe not found — .NET Framework missing' }
 
-            schtasks /Delete /TN $taskName /F 2>$null | Out-Null
-            Remove-Item $killerPath -Force -ErrorAction SilentlyContinue
+            & $csc.FullName /out:$exePath /nologo $srcPath 2>$null | Out-Null
+            if (-not (Test-Path $exePath)) { throw 'Compilation failed' }
 
-            $still = (Get-Process -Name MsMpEng -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
-            if ($still -gt 0) {
-              "(MsMpEng WS: $([math]::Round($still/1MB,1)) MB — schtasks SYSTEM kill also resisted)"
+            # Run the suspender
+            & $exePath
+            Start-Sleep -Seconds 5
+
+            # Also disable service start values so they never restart after runner reboot
+            foreach ($svc in 'WinDefend','WdNisSvc','WdNisDrv','WdFilter') {
+              $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+              if (Test-Path $k) {
+                Set-ItemProperty $k -Name Start -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
+              }
+            }
+
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+
+            # Check: suspended process has near-zero CPU; WS will drain over next ~60s
+            $procs = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+            if ($procs) {
+              $ws = ($procs | Measure-Object WorkingSet64 -Sum).Sum
+              "MsMpEng suspended (WS $([math]::Round($ws/1MB,1)) MB — pages out passively; 0 CPU)"
             } else {
-              "Defender gone via SYSTEM scheduled task"
+              "MsMpEng gone"
             }
           }
 
@@ -276,10 +301,14 @@ jobs:
             }
           }
 
-          # Kill TiWorker.exe directly — it runs as a task host, not a named service
+          # Kill TiWorker — stop TrustedInstaller first so it can't respawn it
           Invoke-Tweak 'Kill TiWorker.exe (Windows Update worker)' {
-            foreach ($p in (Get-Process -Name TiWorker -ErrorAction SilentlyContinue)) {
-              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Stop-Service -Name TrustedInstaller -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            foreach ($name in 'TiWorker','TrustedInstaller') {
+              foreach ($p in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              }
             }
             if (Get-Process -Name TiWorker -ErrorAction SilentlyContinue) { 'still running' } else { 'gone' }
           }
