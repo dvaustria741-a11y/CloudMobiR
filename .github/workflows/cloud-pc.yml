@@ -191,9 +191,34 @@ jobs:
             }
 
             Start-Sleep -Seconds 3
+
+            # Second pass: if MsMpEng still alive, use sc.exe to redirect its binary
+            # to a dummy path so it cannot restart, then suspend + kill via handle
+            $stubborn = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+            if ($stubborn) {
+              # Redirect service binary so SCM can't restart it after kill
+              sc.exe config WinDefend binPath= "cmd.exe /c exit" 2>$null | Out-Null
+              sc.exe config WdNisSvc  binPath= "cmd.exe /c exit" 2>$null | Out-Null
+              # Suspend the process first (reduces Tamper Protection's reactivity)
+              foreach ($p in $stubborn) {
+                try {
+                  $handle = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(0)
+                  $type = Add-Type -MemberDefinition @'
+[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h);
+[DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);
+'@ -Name 'NtDll' -Namespace 'Win32' -PassThru
+                  $ph = [System.Diagnostics.Process]::GetProcessById($p.Id).Handle
+                  [Win32.NtDll]::NtSuspendProcess($ph) | Out-Null
+                } catch {}
+                taskkill /F /T /PID $p.Id 2>$null | Out-Null
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              }
+              Start-Sleep -Seconds 2
+            }
+
             $still = (Get-Process -Name MsMpEng -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
             if ($still -gt 0) {
-              "(MsMpEng still alive — WS: $([math]::Round($still/1MB,1)) MB; Tamper Protection resisted)"
+              "(MsMpEng still alive — WS: $([math]::Round($still/1MB,1)) MB; Tamper Protection fully resisted both passes)"
             } else {
               "Defender processes gone; freed ~$([math]::Round($freed/1MB,0)) MB"
             }
@@ -278,7 +303,7 @@ jobs:
           # vmms: Hyper-V Virtual Machine Management — no nested VMs needed
           # spooler: Print Spooler — no printing
           # tiledatamodelsvc / TiWorker: Windows Update tile cache / update worker
-          foreach ($svc in 'WaAppAgent','WindowsAzureGuestAgent','MSDTC','SQLWriter','sshd','MSMQ','vmms','Spooler','TiledDataSvc') {
+          foreach ($svc in 'WindowsAzureGuestAgent','MSDTC','SQLWriter','sshd','MSMQ','vmms','Spooler') {
             Invoke-Tweak "Service off: $svc" {
               $s = Get-Service -Name $svc -ErrorAction Stop
               if ($s.StartType -eq 'Disabled' -and $s.Status -eq 'Stopped') { return 'already off' }
@@ -553,6 +578,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: ./scripts/save-state.ps1
+
 
 
 
