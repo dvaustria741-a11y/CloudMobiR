@@ -530,47 +530,113 @@ jobs:
           }
 
 
-      - name: Install Lively Wallpaper + set live wallpaper
+      - name: Build + install live video wallpaper
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
 
-          # Download Lively Wallpaper (portable zip — no installer needed)
-          $livelyDir = 'C:\ProgramData\Lively'
-          $livelyExe = "$livelyDir\Lively.exe"
-          New-Item -ItemType Directory -Force -Path $livelyDir | Out-Null
+          # Self-contained C# WPF app compiled on the runner with csc.exe + WPF refs.
+          # On first sign-in it runs from Startup, finds the WorkerW window behind the
+          # desktop icons, and loops the MP4 there using Windows.Media.Playback.
+          # No external downloads needed — everything ships with .NET Framework 4.x.
 
-          $zipPath = Join-Path $env:RUNNER_TEMP 'lively.zip'
-          Invoke-WebRequest `
-            -Uri 'https://github.com/rocksdanister/lively/releases/download/v2.1.0.5/lively_setup_x86_64_full_v2105.exe' `
-            -OutFile $zipPath -UseBasicParsing
-          if ((Get-Item $zipPath).Length -lt 1MB) { throw 'Lively download too small' }
+          $appDir  = 'C:\ProgramData\VideoWallpaper'
+          $srcPath = "$appDir\vw.cs"
+          $exePath = "$appDir\vw.exe"
+          $wpDest  = "$appDir\wallpaper.mp4"
+          New-Item -ItemType Directory -Force -Path $appDir | Out-Null
 
-          # It's an NSIS installer — extract with 7z (preinstalled on runners)
-          $extractDir = Join-Path $env:RUNNER_TEMP 'lively_extract'
-          & 7z x $zipPath "-o$extractDir" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw '7z extraction failed' }
-
-          # NSIS puts files in $INSTDIR — copy to our permanent path
-          $src = Get-ChildItem -Path $extractDir -Filter 'Lively.exe' -Recurse | Select-Object -First 1
-          if (-not $src) { throw 'Lively.exe not found after extraction' }
-          Copy-Item -Path $src.DirectoryName -Destination $livelyDir -Recurse -Force
-
-          # Copy wallpaper video from repo assets to a stable path
-          $wpSrc  = Join-Path $env:GITHUB_WORKSPACE 'assets\wallpaper.mp4'
-          $wpDest = 'C:\ProgramData\Lively\wallpaper.mp4'
+          # Copy video from repo
+          $wpSrc = Join-Path $env:GITHUB_WORKSPACE 'assets\wallpaper.mp4'
           Copy-Item -Path $wpSrc -Destination $wpDest -Force
-          Write-Host "Wallpaper video: $wpDest ($([math]::Round((Get-Item $wpDest).Length/1KB)) KB)"
+          Write-Host "Video copied: $wpDest ($([math]::Round((Get-Item $wpDest).Length/1KB,0)) KB)"
 
-          # Add Lively to all-users Startup so it launches when the RDP user signs in
-          # and immediately sets the wallpaper via CLI args
+          # C# source — WPF window with MediaElement looping, parented to WorkerW
+          $lines = @(
+            'using System;',
+            'using System.Diagnostics;',
+            'using System.Runtime.InteropServices;',
+            'using System.Windows;',
+            'using System.Windows.Controls;',
+            'using System.Windows.Media;',
+            'class VideoWallpaper {',
+            '  [DllImport("user32.dll")] static extern IntPtr FindWindow(string c, string w);',
+            '  [DllImport("user32.dll")] static extern IntPtr FindWindowEx(IntPtr p, IntPtr a, string c, string w);',
+            '  [DllImport("user32.dll")] static extern IntPtr SetParent(IntPtr c, IntPtr p);',
+            '  [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr i, int x, int y, int w, int ht, uint f);',
+            '  [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);',
+            '  [STAThread] static void Main(string[] args) {',
+            '    string path = args.Length > 0 ? args[0] : System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wallpaper.mp4");',
+            '    var app = new Application();',
+            '    var win = new Window {',
+            '      WindowStyle = WindowStyle.None,',
+            '      ResizeMode = ResizeMode.NoResize,',
+            '      ShowInTaskbar = false,',
+            '      Left = 0, Top = 0,',
+            '      Width = SystemParameters.PrimaryScreenWidth,',
+            '      Height = SystemParameters.PrimaryScreenHeight',
+            '    };',
+            '    var me = new MediaElement {',
+            '      Source = new Uri(path),',
+            '      LoadedBehavior = MediaState.Manual,',
+            '      UnloadedBehavior = MediaState.Stop,',
+            '      Stretch = Stretch.UniformToFill,',
+            '      IsMuted = true',
+            '    };',
+            '    me.MediaEnded += (s, e) => { me.Position = TimeSpan.Zero; me.Play(); };',
+            '    win.Content = me;',
+            '    win.Loaded += (s, e) => {',
+            '      var progman = FindWindow("Progman", null);',
+            '      SendMessage(progman, 0x052C, new IntPtr(0), new IntPtr(0));',
+            '      IntPtr workerw = IntPtr.Zero;',
+            '      EnumWindows((hwnd, lp) => {',
+            '        var p = FindWindowEx(hwnd, IntPtr.Zero, "SHELLDLL_DefView", null);',
+            '        if (p != IntPtr.Zero) workerw = FindWindowEx(IntPtr.Zero, hwnd, "WorkerW", null);',
+            '        return true;',
+            '      }, IntPtr.Zero);',
+            '      var helper = new System.Windows.Interop.WindowInteropHelper(win);',
+            '      SetParent(helper.Handle, workerw != IntPtr.Zero ? workerw : progman);',
+            '      me.Play();',
+            '    };',
+            '    app.Run(win);',
+            '  }',
+            '  delegate bool EnumWindowsProc(IntPtr h, IntPtr lp);',
+            '  [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);',
+            '}'
+          )
+          Set-Content -Path $srcPath -Value ($lines -join "`r`n") -Encoding ascii
+
+          # Find latest csc.exe
+          $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $csc) { throw 'csc.exe not found' }
+          Write-Host "csc: $($csc.FullName)"
+
+          # WPF refs shipped with .NET Framework
+          $wpfBase = 'C:\Windows\Microsoft.NET\Framework64'
+          $refs = @(
+            'PresentationFramework.dll',
+            'PresentationCore.dll',
+            'WindowsBase.dll',
+            'System.dll',
+            'System.Xaml.dll'
+          )
+          $refArgs = $refs | ForEach-Object {
+            $found = Get-ChildItem $wpfBase -Filter $_ -Recurse | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($found) { "/r:`"$($found.FullName)`"" }
+          }
+
+          $compileArgs = @('/nologo', '/target:winexe', "/out:`"$exePath`"") + $refArgs + @("`"$srcPath`"")
+          & $csc.FullName @compileArgs
+          if (-not (Test-Path $exePath)) { throw "Compile failed" }
+          Write-Host "Compiled: $exePath"
+
+          # All-users Startup script — runs vw.exe on every sign-in
           $startup = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp'
-          $livelyStartup = Join-Path $startup 'lively-wallpaper.cmd'
-          $cmd = "@echo off`r`nstart /min `"Lively`" `"$livelyExe`"`r`ntimeout /t 5 /nobreak >nul`r`n`"$livelyExe`" setwp --monitor 0 --path `"$wpDest`"`r`n"
-          Set-Content -Path $livelyStartup -Value $cmd -Encoding ascii
-          Write-Host "Lively startup script written to $livelyStartup"
+          $bat = Join-Path $startup 'video-wallpaper.cmd'
+          Set-Content -Path $bat -Value "@echo off`r`nstart /min `"VideoWallpaper`" `"$exePath`" `"$wpDest`"`r`n" -Encoding ascii
+          Write-Host "Startup script: $bat"
 
       - name: Keep session alive
         shell: pwsh
