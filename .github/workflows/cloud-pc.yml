@@ -531,6 +531,49 @@ jobs:
             Write-Host 'Profile not created yet; the config is applied at the first sign-in.'
           }
 
+
+      - name: Install Lively Wallpaper + set live wallpaper
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          # Download Lively Wallpaper (portable zip — no installer needed)
+          $livelyDir = 'C:\ProgramData\Lively'
+          $livelyExe = "$livelyDir\Lively.exe"
+          New-Item -ItemType Directory -Force -Path $livelyDir | Out-Null
+
+          $zipPath = Join-Path $env:RUNNER_TEMP 'lively.zip'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/rocksdanister/lively/releases/download/v2.1.0.5/lively_setup_x86_64_full_v2105.exe' `
+            -OutFile $zipPath -UseBasicParsing
+          if ((Get-Item $zipPath).Length -lt 1MB) { throw 'Lively download too small' }
+
+          # It's an NSIS installer — extract with 7z (preinstalled on runners)
+          $extractDir = Join-Path $env:RUNNER_TEMP 'lively_extract'
+          & 7z x $zipPath "-o$extractDir" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '7z extraction failed' }
+
+          # NSIS puts files in $INSTDIR — copy to our permanent path
+          $src = Get-ChildItem -Path $extractDir -Filter 'Lively.exe' -Recurse | Select-Object -First 1
+          if (-not $src) { throw 'Lively.exe not found after extraction' }
+          Copy-Item -Path $src.DirectoryName -Destination $livelyDir -Recurse -Force
+
+          # Copy wallpaper video from repo assets to a stable path
+          $wpSrc  = Join-Path $env:GITHUB_WORKSPACE 'assets\wallpaper.mp4'
+          $wpDest = 'C:\ProgramData\Lively\wallpaper.mp4'
+          Copy-Item -Path $wpSrc -Destination $wpDest -Force
+          Write-Host "Wallpaper video: $wpDest ($([math]::Round((Get-Item $wpDest).Length/1KB)) KB)"
+
+          # Add Lively to all-users Startup so it launches when the RDP user signs in
+          # and immediately sets the wallpaper via CLI args
+          $startup = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp'
+          $livelyStartup = Join-Path $startup 'lively-wallpaper.cmd'
+          $cmd = "@echo off`r`nstart /min `"Lively`" `"$livelyExe`"`r`ntimeout /t 5 /nobreak >nul`r`n`"$livelyExe`" setwp --monitor 0 --path `"$wpDest`"`r`n"
+          Set-Content -Path $livelyStartup -Value $cmd -Encoding ascii
+          Write-Host "Lively startup script written to $livelyStartup"
+
       - name: Keep session alive
         shell: pwsh
         run: |
