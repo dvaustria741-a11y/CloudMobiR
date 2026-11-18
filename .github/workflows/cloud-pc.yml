@@ -250,32 +250,15 @@ jobs:
             # NtSuspendProcess on a PPL process returns 0xC0000022 (ACCESS_DENIED) for the
             # status code but the kernel DOES freeze the thread schedule — confirmed: 0 CPU impact.
             Write-Host '  Falling back to NtSuspendProcess (confirmed 0 CPU)'
-            $suspendSrc = @"
-using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-class Suspender {
-    [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);
-    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint acc, bool inh, uint pid);
-    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
-    static void Main(string[] args) {
-        string[] names = {"MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP","SecurityHealthService","MpCopyAccelerator"};
-        foreach (var n in names) {
-            foreach (var p in Process.GetProcessesByName(n)) {
-                IntPtr h = OpenProcess(0x001FFFFF, false, (uint)p.Id);
-                int s = NtSuspendProcess(h); CloseHandle(h);
-                Console.WriteLine($"susp {n} pid={p.Id} ntstatus=0x{(uint)s:X8}");
-            }
-        }
-    }
-}
-"@
-            $suspExe = "$tmpDir\Suspender.exe"
+            # C# source base64-encoded to avoid YAML parser choking on bare 'using System;' lines
+            # inside a PowerShell here-string embedded in a YAML block scalar.
+            $suspB64 = 'dXNpbmcgU3lzdGVtOyB1c2luZyBTeXN0ZW0uRGlhZ25vc3RpY3M7IHVzaW5nIFN5c3RlbS5SdW50aW1lLkludGVyb3BTZXJ2aWNlczsgY2xhc3MgU3VzcGVuZGVyIHsgW0RsbEltcG9ydCgibnRkbGwuZGxsIildIHN0YXRpYyBleHRlcm4gaW50IE50U3VzcGVuZFByb2Nlc3MoSW50UHRyIGgpOyBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLCBTZXRMYXN0RXJyb3I9dHJ1ZSldIHN0YXRpYyBleHRlcm4gSW50UHRyIE9wZW5Qcm9jZXNzKHVpbnQgYWNjLCBib29sIGluaCwgdWludCBwaWQpOyBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiKV0gc3RhdGljIGV4dGVybiBib29sIENsb3NlSGFuZGxlKEludFB0ciBoKTsgc3RhdGljIHZvaWQgTWFpbihzdHJpbmdbXSBhcmdzKSB7IHN0cmluZ1tdIG5hbWVzID0geyJNc01wRW5nIiwiTXBEZWZlbmRlckNvcmVTZXJ2aWNlIiwiTmlzU3J2IiwiTXNNcEVuZ0NQIiwiU2VjdXJpdHlIZWFsdGhTZXJ2aWNlIiwiTXBDb3B5QWNjZWxlcmF0b3IifTsgZm9yZWFjaCAodmFyIG4gaW4gbmFtZXMpIHsgZm9yZWFjaCAodmFyIHAgaW4gUHJvY2Vzcy5HZXRQcm9jZXNzZXNCeU5hbWUobikpIHsgSW50UHRyIGggPSBPcGVuUHJvY2VzcygweDAwMUZGRkZGLCBmYWxzZSwgKHVpbnQpcC5JZCk7IGludCBzID0gTnRTdXNwZW5kUHJvY2VzcyhoKTsgQ2xvc2VIYW5kbGUoaCk7IENvbnNvbGUuV3JpdGVMaW5lKCQic3VzcCB7bn0gcGlkPXtwLklkfSBudHN0YXR1cz0weHsodWludClzOlg4fSIpOyB9IH0gfSB9'
+            $suspSrcPath = "$tmpDir\Suspender.cs"
+            $suspExe     = "$tmpDir\Suspender.exe"
+            [IO.File]::WriteAllText($suspSrcPath, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($suspB64)))
             $csc2 = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
                     Sort-Object FullName -Descending | Select-Object -First 1
             if ($csc2) {
-              $suspSrcPath = "$tmpDir\Suspender.cs"
-              Set-Content $suspSrcPath $suspendSrc -Encoding ascii
               & $csc2.FullName /nologo /target:exe /out:$suspExe $suspSrcPath 2>&1 | Out-Null
               if (Test-Path $suspExe) { & $suspExe }
             }
