@@ -214,6 +214,29 @@ jobs:
               if (-not (Test-Path $csExe)) { throw 'PPLKill.exe compile failed' }
               Write-Host '  Compiled PPLKill.exe (procexp152 edition)'
 
+              # Locate procexp64.exe on this runner so we can report + pass path explicitly
+              $procexpCandidates = @(
+                'C:\tools\procexp64.exe',
+                'C:\tools\procexp.exe',
+                'C:\Program Files\Process Explorer\procexp64.exe',
+                'C:\Program Files\Process Explorer\procexp.exe',
+                'C:\ProgramData\chocolatey\tools\procexp64.exe',
+                'C:\ProgramData\chocolatey\tools\procexp.exe',
+                'C:\Windows\System32\procexp64.exe'
+              )
+              $foundProcexp = $null
+              foreach ($c in $procexpCandidates) { if (Test-Path $c) { $foundProcexp = $c; break } }
+              if (-not $foundProcexp) {
+                # Broader scan — C:\tools and chocolatey bin dirs
+                $foundProcexp = Get-ChildItem 'C:\tools','C:\ProgramData\chocolatey\bin' -Filter 'procexp*' -ErrorAction SilentlyContinue |
+                  Select-Object -First 1 -ExpandProperty FullName
+              }
+              if ($foundProcexp) { Write-Host "  procexp found: $foundProcexp" }
+              else {
+                Write-Host '  procexp NOT found in standard paths — scanning C:\tools recursively...'
+                Get-ChildItem 'C:\tools' -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | ForEach-Object { Write-Host "    $_" }
+              }
+
               # Run it — it auto-finds and launches procexp64.exe to load the driver
               $out = & $csExe 2>&1
               $out | ForEach-Object { Write-Host "  $_" }
