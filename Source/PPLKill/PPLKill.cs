@@ -84,7 +84,7 @@ class PPLKill {
 
         Process procexpProc = null;
         if (!driverAlreadyLoaded && procexpPath != null) {
-            Console.WriteLine($"Launching {procexpPath} to load driver...");
+            Console.WriteLine("Launching " + procexpPath + " to load driver...");
             procexpProc = Process.Start(new ProcessStartInfo(procexpPath, "/accepteula") {
                 WindowStyle = ProcessWindowStyle.Minimized
             });
@@ -114,10 +114,10 @@ class PPLKill {
                     out bytesRet, IntPtr.Zero);
                 if (ok && resp.ProcessHandle != IntPtr.Zero) {
                     bool killed = TerminateProcess(resp.ProcessHandle, 1);
-                    Console.WriteLine($"[{(killed ? "KILLED" : "FAIL")}] {name} pid={proc.Id} handle=0x{resp.ProcessHandle.ToInt64():X}");
+                    Console.WriteLine("[" + (killed ? "KILLED" : "FAIL") + "] " + name + " pid=" + proc.Id + " handle=0x" + resp.ProcessHandle.ToInt64().ToString("X"));
                     CloseHandle(resp.ProcessHandle);
                 } else {
-                    Console.WriteLine($"[NOHANDLE] {name} pid={proc.Id} err={Marshal.GetLastWin32Error()}");
+                    Console.WriteLine("[NOHANDLE] " + name + " pid=" + proc.Id + " err=" + Marshal.GetLastWin32Error());
                 }
             }
         }
