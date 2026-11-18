@@ -207,7 +207,7 @@ jobs:
               $refPaths = $refs | ForEach-Object {
                 $f = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter $_ -Recurse |
                      Sort-Object FullName -Descending | Select-Object -First 1
-                if ($f) { "/r:`"$($f.FullName)`"" }
+                if ($f) { "/r:$($f.FullName)" }
               }
               $compileArgs = @('/nologo','/target:exe',"/out:$csExe") + $refPaths + @($csSrc)
               & $csc.FullName @compileArgs 2>&1 | ForEach-Object { Write-Host "  csc: $_" }
