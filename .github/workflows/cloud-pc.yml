@@ -191,7 +191,7 @@ jobs:
             # Process Explorer (Sysinternals) ships procexp152.sys on GitHub Actions runners.
             # It exposes IOCTL 0x0022E030 which opens any process with PROCESS_ALL_ACCESS
             # bypassing PPL — documented by Jonas Lykkegaard.
-            # procexp64.exe is at C:	ools\procexp64.exe on windows-latest runners.
+            # procexp64.exe is at C:\tools\procexp64.exe on windows-latest runners.
             $byovdOk = $false
             try {
               # Compile the procexp-based PPLKill from repo source

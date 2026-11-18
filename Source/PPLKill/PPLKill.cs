@@ -38,12 +38,20 @@ class PPLKill {
     const uint IOCTL_PROCEXP_OPEN_PROCESS = 0x0022E030;
     const uint PROCESS_ALL_ACCESS = 0x001FFFFF;
 
+    // Returns IntPtr.Zero on failure (normalises INVALID_HANDLE_VALUE = -1)
+    static IntPtr OpenDev(string name) {
+        var h = CreateFile(@"\\.\" + name, GENERIC_READ_WRITE, FILE_SHARE_RW,
+            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1)) { CloseHandle(h); return IntPtr.Zero; }
+        return h;
+    }
+
     static void Main(string[] args) {
         // Find and launch procexp to load the driver
         string[] searchPaths = {
-            @"C:	ools\procexp64.exe",
+            @"C:\tools\procexp64.exe",
             @"C:\Program Files\Process Explorer\procexp64.exe",
-            @"C:\ProgramData\chocolatey	ools\procexp64.exe",
+            @"C:\ProgramData\chocolatey\tools\procexp64.exe",
             @"C:\Windows\System32\procexp64.exe",
         };
 
@@ -66,16 +74,12 @@ class PPLKill {
             if (File.Exists(p)) { procexpPath = p; break; }
         }
 
-        // Also check running processes — procexp might already be running
-        bool driverAlreadyLoaded = false;
-        var hDev = CreateFile(@"\.\PROCEXP152", GENERIC_READ_WRITE, FILE_SHARE_RW,
-            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (hDev != new IntPtr(-1)) {
+        // Try to open the device — procexp may already be running from a prior step
+
+        var hDev = OpenDev("PROCEXP152");
+        bool driverAlreadyLoaded = hDev != IntPtr.Zero;
+        if (driverAlreadyLoaded) {
             Console.WriteLine("procexp152.sys already loaded");
-            driverAlreadyLoaded = true;
-        } else {
-            CloseHandle(hDev);
-            hDev = IntPtr.Zero;
         }
 
         Process procexpProc = null;
@@ -86,18 +90,13 @@ class PPLKill {
             });
             System.Threading.Thread.Sleep(3000);
 
-            hDev = CreateFile(@"\.\PROCEXP152", GENERIC_READ_WRITE, FILE_SHARE_RW,
-                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-            if (hDev == new IntPtr(-1)) {
-                // Try PROCEXP153 (newer versions)
-                hDev = CreateFile(@"\.\PROCEXP153", GENERIC_READ_WRITE, FILE_SHARE_RW,
-                    IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-            }
+            hDev = OpenDev("PROCEXP152");
+            if (hDev == IntPtr.Zero) hDev = OpenDev("PROCEXP153"); // newer versions
         }
 
-        if (hDev == IntPtr.Zero || hDev == new IntPtr(-1)) {
-            Console.WriteLine("ERROR: Could not open procexp device");
-            procexpProc?.Kill();
+        if (hDev == IntPtr.Zero) {
+            Console.WriteLine("ERROR: Could not open PROCEXP152/153 device — procexp not running or driver not loaded");
+            if (procexpProc != null) try { procexpProc.Kill(); } catch {}
             Environment.Exit(1);
         }
 
