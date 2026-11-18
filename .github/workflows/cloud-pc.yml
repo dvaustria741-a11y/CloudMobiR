@@ -209,7 +209,7 @@ jobs:
                      Sort-Object FullName -Descending | Select-Object -First 1
                 if ($f) { "/r:`"$($f.FullName)`"" }
               }
-              $compileArgs = @('/nologo','/target:exe',"/out:`"$csExe`"") + $refPaths + @("`"$csSrc`"")
+              $compileArgs = @('/nologo','/target:exe',"/out:$csExe") + $refPaths + @($csSrc)
               & $csc.FullName @compileArgs 2>&1 | ForEach-Object { Write-Host "  csc: $_" }
               if (-not (Test-Path $csExe)) { throw 'PPLKill.exe compile failed' }
               Write-Host '  Compiled PPLKill.exe (procexp152 edition)'
