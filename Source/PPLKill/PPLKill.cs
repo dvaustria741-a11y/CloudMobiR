@@ -123,6 +123,6 @@ class PPLKill {
         }
 
         CloseHandle(hDev);
-        procexpProc?.Kill();
+        if (procexpProc != null) try { procexpProc.Kill(); } catch {}
     }
 }
