@@ -195,10 +195,38 @@ jobs:
             #   RTCORE_REQUEST struct (48 bytes): Unknown0, Address, Unknown1, Size, Value, Unknown2, Unknown3
             $byovdOk = $false
             try {
-              Write-Host '  Installing MSI Afterburner to extract RTCore64.sys...'
-              & choco install msiafterburner -y --no-progress --ignore-checksums 2>&1 | Out-Null
-              $rtcore = Get-ChildItem 'C:\Program Files (x86)\MSI Afterburner' -Filter 'RTCore64.sys' -Recurse -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
+              Write-Host '  Fetching RTCore64.sys via MSI Afterburner installer...'
+              $msiUrl  = 'https://download.msi.com/uti_exe/vga/MSIAfterburnerSetup.zip'
+              $zipPath = "$tmpDir\AB.zip"
+              $exPath  = "$tmpDir\AB_extract"
+              Invoke-WebRequest -Uri $msiUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 60
+              Expand-Archive -Path $zipPath -DestinationPath $exPath -Force
+
+              # Run the installer silently to extract files (NSIS /S flag)
+              $abSetup = Get-ChildItem $exPath -Filter 'MSIAfterburnerSetup*.exe' -Recurse | Select-Object -First 1
+              if ($abSetup) {
+                Start-Process $abSetup.FullName -ArgumentList '/S' -Wait
+              }
+
+              # Search all likely paths for RTCore64.sys
+              $searchPaths = @(
+                'C:\Program Files (x86)\MSI Afterburner',
+                'C:\Program Files\MSI Afterburner',
+                $exPath,
+                "$tmpDir"
+              )
+              $rtcore = $null
+              foreach ($sp in $searchPaths) {
+                if (Test-Path $sp) {
+                  $rtcore = Get-ChildItem $sp -Filter 'RTCore64.sys' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                  if ($rtcore) { break }
+                }
+              }
+              if (-not $rtcore) {
+                # Last resort: extract directly from installer with 7z (bundled on runners)
+                & 7z e $abSetup.FullName RTCore64.sys "-o$tmpDir" -y 2>$null | Out-Null
+                $rtcore = Get-Item "$tmpDir\RTCore64.sys" -ErrorAction SilentlyContinue
+              }
               if (-not $rtcore) { throw 'RTCore64.sys not found after MSI Afterburner install' }
               $sysPath = "$tmpDir\RTCore64.sys"
               Copy-Item $rtcore.FullName $sysPath -Force
