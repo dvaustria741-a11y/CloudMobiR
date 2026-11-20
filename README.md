@@ -23,7 +23,9 @@ The run puts `RobloxStudioInstaller.exe` on the cloud PC's desktop. Double-click
 The run installs Blender (Chocolatey package `blender`) and tries to install Claude Desktop (the signed Windows installer from claude.ai) after RDP is already reachable, so connect when "Verify RDP is reachable" is green and give the installs a few minutes. Both steps are non-fatal; check their step logs if an app is missing. The runner has no GPU, so Blender renders on the CPU.
 
 ## Roblox Player and Blender OpenGL
-The run downloads `RobloxPlayerInstaller.exe` to the desktop and attempts a silent install (URL in `ROBLOX_PLAYER_URL`). The runner has no GPU, so after Blender is installed the run copies Mesa's software OpenGL `opengl32.dll` (mmozeiko/build-mesa, llvmpipe x64, URL in `MESA_LLVMPIPE_URL`) next to `blender.exe`. That is what clears Blender's "OpenGL 4.3 or higher is required" error; Blender is slow on it. Both steps are non-fatal.
+The run puts `RobloxPlayerInstaller.exe` on the desktop (URL in `ROBLOX_PLAYER_URL`); double-click it inside the RDP session like the Studio installer above. There is no known silent-install switch for it, so this step does not attempt one. The runner has no GPU, so after Blender is installed the run copies Mesa's software OpenGL `opengl32.dll` (mmozeiko/build-mesa, llvmpipe x64, URL in `MESA_LLVMPIPE_URL`) next to `blender.exe`. That is what clears Blender's "OpenGL 4.3 or higher is required" error; Blender is slow on it. Both steps are non-fatal.
+
+Player itself has no software-OpenGL equivalent to drop in: it uses Direct3D 11, which Windows always has, and with no GPU it falls back to the Microsoft Basic Render Driver / WARP. Whether Roblox's own renderer accepts that fallback is unconfirmed; if a game will not open, use Roblox Diagnose below.
 
 ## Roblox Diagnose shortcut
 If Roblox Player will not open a game, double-click `Roblox Diagnose` on the desktop. It starts the Player directly, then writes GPU, OS, exit code, recent Windows application errors and the newest Roblox logs to `roblox-diagnose.txt` on your desktop and opens it. Send that file's contents instead of typing commands over RDP.

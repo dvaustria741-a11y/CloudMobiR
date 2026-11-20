@@ -50,6 +50,8 @@ jobs:
       STATE_PASSWORD: ${{ secrets.STATE_PASSWORD }}
       # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
       STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
+      # Assumption, not verified by me: official Roblox Player bootstrapper URL, same host/pattern as the Studio one above.
+      ROBLOX_PLAYER_URL: https://setup.rbxcdn.com/RobloxPlayerLauncher.exe
       # Verified by me: mmozeiko/build-mesa release 26.3.0 asset lists opengl32.dll (statically linked llvmpipe, software OpenGL). Not run on this runner.
       MESA_LLVMPIPE_URL: https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/mesa-llvmpipe-x64-26.3.0.7z
       # Claude Desktop Windows x64 installer. Both claude.ai URLs below answer with a Cloudflare managed challenge (cf-mitigated: challenge, HTTP 403) to a non-browser client; I confirmed that from my sandbox for both. The step therefore tries each URL in order and checks that the download is a signed PE file. CLAUDE_SETUP_DIRECT_URL (repository variable, optional) is for the final file URL that the redirect leads to, copied from a browser's download list; it is not a Cloudflare-challenged page if it points at the file host.
@@ -474,6 +476,82 @@ jobs:
           $head = [System.IO.File]::ReadAllBytes($dest)[0..1]
           if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
           Write-Host "Installer saved to $dest ($($f.Length) bytes)"
+
+      - name: Download Roblox Player installer to the desktop
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = 'C:\Users\Public\Desktop\RobloxPlayerInstaller.exe'
+          Invoke-WebRequest -Uri $env:ROBLOX_PLAYER_URL -OutFile $dest
+          $f = Get-Item $dest
+          $head = [System.IO.File]::ReadAllBytes($dest)[0..1]
+          if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
+          Write-Host "Installer saved to $dest ($($f.Length) bytes)"
+
+      - name: Add Roblox Diagnose shortcut to the desktop
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolsDir = 'C:\ProgramData\CloudPC'
+          New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
+          $scriptPath = Join-Path $toolsDir 'roblox-diagnose.ps1'
+          # Run from inside the RDP session, after installing Roblox Player, when a game will not open.
+          # Finds whatever RobloxPlayerBeta.exe is actually installed (the folder name is a per-install version hash, so it is never hardcoded), launches it,
+          # waits up to 20 seconds, then writes GPU info, OS build, the process exit code (if it already exited), recent Windows Application-log errors and
+          # the newest Roblox log to roblox-diagnose.txt on the desktop and opens it. It does not interpret the result; you read the file and tell me what it says.
+          $lines = @(
+            '$ErrorActionPreference = ''Continue''',
+            '$out = Join-Path ([Environment]::GetFolderPath(''Desktop'')) ''roblox-diagnose.txt''',
+            '$report = [System.Collections.Generic.List[string]]::new()',
+            '$report.Add("Roblox Diagnose - $(Get-Date -Format u)")',
+            '$report.Add("")',
+            '$report.Add("--- GPU (Win32_VideoController) ---")',
+            'Get-CimInstance Win32_VideoController | ForEach-Object { $report.Add("$($_.Name) | driver $($_.DriverVersion) | $($_.AdapterRAM) bytes VRAM") }',
+            '$report.Add("")',
+            '$report.Add("--- OS ---")',
+            '$os = Get-CimInstance Win32_OperatingSystem',
+            '$report.Add("$($os.Caption) build $($os.BuildNumber)")',
+            '$report.Add("")',
+            '$exe = Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox\Versions" -Filter RobloxPlayerBeta.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1',
+            'if (-not $exe) {',
+            '  $report.Add("RobloxPlayerBeta.exe not found under $env:LOCALAPPDATA\Roblox\Versions - Player is not installed yet.")',
+            '} else {',
+            '  $report.Add("--- Launch ---")',
+            '  $report.Add("Starting $($exe.FullName)")',
+            '  $p = Start-Process -FilePath $exe.FullName -PassThru',
+            '  $exited = $p.WaitForExit(20000)',
+            '  if ($exited) { $report.Add("Process exited within 20s, exit code $($p.ExitCode).") }',
+            '  else { $report.Add("Process is still running after 20s (exit code not available yet); check the window on screen too.") }',
+            '  $report.Add("")',
+            '  $report.Add("--- Recent Windows Application-log errors (last 5 min) ---")',
+            '  $since = (Get-Date).AddMinutes(-5)',
+            '  try {',
+            '    Get-WinEvent -FilterHashtable @{LogName=''Application''; Level=2; StartTime=$since} -MaxEvents 20 -ErrorAction Stop |',
+            '      ForEach-Object { $report.Add("$($_.TimeCreated.ToString(''u'')) [$($_.ProviderName)] $($_.Message -replace ''\r?\n'', '' '')") }',
+            '  } catch { $report.Add("(no matching events, or Get-WinEvent failed: $_)") }',
+            '}',
+            '$report.Add("")',
+            '$report.Add("--- Newest Roblox log ---")',
+            '$logDir = "$env:LOCALAPPDATA\Roblox\logs"',
+            'if (Test-Path $logDir) {',
+            '  $latest = Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1',
+            '  if ($latest) { $report.Add("File: $($latest.Name)"); $report.Add((Get-Content $latest.FullName -Raw)) }',
+            '  else { $report.Add("Logs folder exists but is empty.") }',
+            '} else { $report.Add("No $logDir yet.") }',
+            'Set-Content -Path $out -Value ($report -join "`r`n") -Encoding utf8',
+            'Start-Process notepad.exe $out'
+          )
+          Set-Content -Path $scriptPath -Value ($lines -join "`r`n") -Encoding utf8
+          $lnk = 'C:\Users\Public\Desktop\Roblox Diagnose.lnk'
+          $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          $sh.TargetPath = 'powershell.exe'
+          $sh.Arguments = "-NoLogo -ExecutionPolicy Bypass -File `"$scriptPath`""
+          $sh.WorkingDirectory = $toolsDir
+          $sh.Save()
+          if (-not (Test-Path $lnk)) { throw 'Shortcut was not created.' }
+          Write-Host "Roblox Diagnose shortcut created: $lnk"
 
       - name: Add Claude Desktop download shortcut to the desktop
         continue-on-error: true
