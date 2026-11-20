@@ -50,6 +50,8 @@ jobs:
       STATE_PASSWORD: ${{ secrets.STATE_PASSWORD }}
       # Assumption, not verified by me: official Roblox Studio bootstrapper URL.
       STUDIO_INSTALLER_URL: https://setup.rbxcdn.com/RobloxStudioInstaller.exe
+      # Assumption, not verified by me: official Roblox Player bootstrapper URL, same host/pattern as the Studio one above.
+      ROBLOX_PLAYER_URL: https://setup.rbxcdn.com/RobloxPlayerLauncher.exe
       # Verified by me: mmozeiko/build-mesa release 26.3.0 asset lists opengl32.dll (statically linked llvmpipe, software OpenGL). Not run on this runner.
       MESA_LLVMPIPE_URL: https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/mesa-llvmpipe-x64-26.3.0.7z
       # Claude Desktop Windows x64 installer. Both claude.ai URLs below answer with a Cloudflare managed challenge (cf-mitigated: challenge, HTTP 403) to a non-browser client; I confirmed that from my sandbox for both. The step therefore tries each URL in order and checks that the download is a signed PE file. CLAUDE_SETUP_DIRECT_URL (repository variable, optional) is for the final file URL that the redirect leads to, copied from a browser's download list; it is not a Cloudflare-challenged page if it points at the file host.
@@ -475,46 +477,17 @@ jobs:
           if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
           Write-Host "Installer saved to $dest ($($f.Length) bytes)"
 
-      - name: Download and install Roblox Player
+      - name: Download Roblox Player installer to the desktop
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
-          # Resolves the current live WindowsPlayer build from Roblox's own client-version API, then builds the
-          # matching bootstrapper URL. Not run by me on this runner, but the URL pattern and the API's response
-          # shape are cross-confirmed from Roblox's own API docs (create.roblox.com), the pizzaboxer/bloxstrap
-          # wiki's write-up of the bootstrapper's internals, and several independent third-party sandbox traces
-          # of real RobloxPlayerLauncher.exe downloads: https://setup.rbxcdn.com/<clientVersionUpload>-RobloxPlayerLauncher.exe
-          # clientVersionUpload already includes the "version-" prefix (e.g. "version-460909c4fe904aae"); the
-          # previous static guess (bare RobloxPlayerLauncher.exe with no version) was never confirmed to resolve
-          # to anything and no evidence of it existing turned up, so it is replaced rather than kept as a fallback.
-          $versionInfo = Invoke-RestMethod -Uri 'https://clientsettings.roblox.com/v2/client-version/WindowsPlayer/channel/LIVE'
-          $versionHash = $versionInfo.clientVersionUpload
-          if ([string]::IsNullOrWhiteSpace($versionHash)) { throw 'clientsettings.roblox.com did not return clientVersionUpload.' }
-          Write-Host "Live WindowsPlayer version: $versionHash"
-
-          $installerUrl = "https://setup.rbxcdn.com/$versionHash-RobloxPlayerLauncher.exe"
-          $installerPath = 'C:\Users\Public\Desktop\RobloxPlayerLauncher.exe'
-          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
-          $f = Get-Item $installerPath
-          $head = [System.IO.File]::ReadAllBytes($installerPath)[0..1]
-          if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $installerPath -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
-          Write-Host "Installer saved to $installerPath ($($f.Length) bytes)"
-
-          # No silent-install flag is passed. RobloxPlayerLauncher.exe is the bootstrapper itself, not a
-          # traditional NSIS/InstallShield wizard; per the bloxstrap wiki write-up it runs its own download-
-          # and-extract sequence on an automatic progress dialog with nothing to click through, then tries to
-          # launch Roblox if it was given a join link. Unverified on this runner: if it is NOT given a join
-          # link, what it does at that last step (exit quietly, or show an error dialog) is unknown to me, and
-          # that dialog, if it appears, would need dismissing by hand over RDP; this step only confirms install.
-          $p = Start-Process -FilePath $installerPath -PassThru
-          $exited = $p.WaitForExit(300000)
-          if (-not $exited) { Write-Host 'Bootstrapper did not finish within 5 minutes; it may still be running or showing a dialog. Check over RDP.' }
-
-          $betaExe = Get-ChildItem -Path "$env:LOCALAPPDATA\Roblox\Versions\$versionHash" -Filter RobloxPlayerBeta.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($betaExe) { Write-Host "Installed: $($betaExe.FullName)" }
-          else { Write-Host "RobloxPlayerBeta.exe not found yet under `$env:LOCALAPPDATA\Roblox\Versions\$versionHash; if the bootstrapper is still running or waiting on a dialog, finish it over RDP, then re-run Roblox Diagnose." }
+          $dest = 'C:\Users\Public\Desktop\RobloxPlayerInstaller.exe'
+          Invoke-WebRequest -Uri $env:ROBLOX_PLAYER_URL -OutFile $dest
+          $f = Get-Item $dest
+          $head = [System.IO.File]::ReadAllBytes($dest)[0..1]
+          if ($f.Length -lt 100KB -or $head[0] -ne 0x4D -or $head[1] -ne 0x5A) { Remove-Item $dest -Force; throw "Downloaded file is not a valid Windows executable ($($f.Length) bytes)." }
+          Write-Host "Installer saved to $dest ($($f.Length) bytes)"
 
       - name: Add Roblox Diagnose shortcut to the desktop
         continue-on-error: true
