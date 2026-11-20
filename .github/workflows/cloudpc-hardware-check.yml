@@ -1,0 +1,55 @@
+name: CloudMobiR - Hardware Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hardware:
+    runs-on: [self-hosted, Linux, ARM64]
+
+    steps:
+      - name: CPU
+        run: |
+          echo "===== CPU ====="
+          lscpu
+          echo ""
+          cat /proc/cpuinfo | head -30
+
+      - name: RAM
+        run: |
+          echo "===== MEMORY ====="
+          free -h
+
+      - name: Storage
+        run: |
+          echo "===== STORAGE ====="
+          df -h
+          lsblk || true
+
+      - name: GPU Detection
+        run: |
+          echo "===== GPU DEVICES ====="
+          ls -lah /dev | grep -Ei 'kgsl|mali|gpu|drm|render' || true
+          echo ""
+          ls -lah /dev/dri 2>/dev/null || echo "/dev/dri not available"
+          echo ""
+          ls -lah /dev/kgsl-3d0 2>/dev/null || echo "KGSL device not exposed"
+
+      - name: Vulkan
+        run: |
+          echo "===== VULKAN ====="
+          command -v vulkaninfo || echo "vulkaninfo not installed"
+          command -v vulkaninfo32 || true
+          ls /usr/share/vulkan/icd.d/ 2>/dev/null || true
+
+      - name: System
+        run: |
+          echo "===== OS ====="
+          cat /etc/os-release
+          echo ""
+          echo "===== ENVIRONMENT ====="
+          uname -a
+          echo ""
+          echo "===== RUNNER ====="
+          whoami
+          pwd
