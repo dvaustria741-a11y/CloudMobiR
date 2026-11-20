@@ -91,18 +91,20 @@ jobs:
         continue-on-error: true
         run: |
           # Persist GPU env vars into shell profile so VNC session inherits them
-          grep -q "CloudMobiR GPU tweaks" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc << 'EOF'
-# CloudMobiR GPU tweaks
-export MESA_VK_VERSION_OVERRIDE=1.3
-export MESA_GL_VERSION_OVERRIDE=4.3
-export MESA_GLSL_VERSION_OVERRIDE=430
-export VK_ICD_FILENAMES=/data/data/com.termux/files/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json
-export WINEESYNC=1
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_LOG_LEVEL=none
-export GALLIUM_DRIVER=freedreno
-EOF
+          grep -q "CloudMobiR GPU tweaks" ~/.bashrc 2>/dev/null || {
+            printf '%s\n' \
+              '# CloudMobiR GPU tweaks' \
+              'export MESA_VK_VERSION_OVERRIDE=1.3' \
+              'export MESA_GL_VERSION_OVERRIDE=4.3' \
+              'export MESA_GLSL_VERSION_OVERRIDE=430' \
+              'export VK_ICD_FILENAMES=/data/data/com.termux/files/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json' \
+              'export WINEESYNC=1' \
+              'export DXVK_ASYNC=1' \
+              'export DXVK_STATE_CACHE=1' \
+              'export DXVK_LOG_LEVEL=none' \
+              'export GALLIUM_DRIVER=freedreno' \
+              >> ~/.bashrc
+          }
           # CPU governor performance mode (needs root on most devices, best-effort)
           for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
             echo performance > "$cpu" 2>/dev/null || true
@@ -117,21 +119,21 @@ EOF
           mkdir -p ~/.vnc
           printf '%s' "$VNC_PASSWORD" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
-          cat > ~/.vnc/xstartup << 'XEOF'
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export MESA_VK_VERSION_OVERRIDE=1.3
-export MESA_GL_VERSION_OVERRIDE=4.3
-export MESA_GLSL_VERSION_OVERRIDE=430
-export VK_ICD_FILENAMES=/data/data/com.termux/files/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json
-export WINEESYNC=1
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_LOG_LEVEL=none
-export GALLIUM_DRIVER=freedreno
-dbus-launch --exit-with-session startxfce4 &
-XEOF
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'unset SESSION_MANAGER' \
+            'unset DBUS_SESSION_BUS_ADDRESS' \
+            'export MESA_VK_VERSION_OVERRIDE=1.3' \
+            'export MESA_GL_VERSION_OVERRIDE=4.3' \
+            'export MESA_GLSL_VERSION_OVERRIDE=430' \
+            'export VK_ICD_FILENAMES=/data/data/com.termux/files/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json' \
+            'export WINEESYNC=1' \
+            'export DXVK_ASYNC=1' \
+            'export DXVK_STATE_CACHE=1' \
+            'export DXVK_LOG_LEVEL=none' \
+            'export GALLIUM_DRIVER=freedreno' \
+            'dbus-launch --exit-with-session startxfce4 &' \
+            > ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
           vncserver :1 -geometry 1280x720 -depth 24 -rfbauth ~/.vnc/passwd
           sleep 2
