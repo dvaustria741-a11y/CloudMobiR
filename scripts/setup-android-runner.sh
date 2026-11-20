@@ -76,20 +76,21 @@ fi
 
 # ── 5. Turnip / Mesa env vars ─────────────────────────────────────────────────
 echo "[5/7] Setting GPU environment variables..."
-grep -q "CloudMobiR GPU tweaks" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc << 'EOF'
-# CloudMobiR GPU tweaks — Turnip (open-source Qualcomm Vulkan)
-export MESA_VK_VERSION_OVERRIDE=1.3
-export MESA_GL_VERSION_OVERRIDE=4.3
-export MESA_GLSL_VERSION_OVERRIDE=430
-export VK_ICD_FILENAMES=/data/data/com.termux/files/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json
-export GALLIUM_DRIVER=freedreno
-export WINEESYNC=1
-export DXVK_ASYNC=1
-export DXVK_STATE_CACHE=1
-export DXVK_LOG_LEVEL=none
-# Point Box64 to Wine
-export BOX64_WINE="$HOME/wine-ge/bin/wine"
-EOF
+grep -q "CloudMobiR GPU tweaks" ~/.bashrc 2>/dev/null || {
+  printf '%s\n' \
+    '# CloudMobiR GPU tweaks — Turnip (open-source Qualcomm Vulkan)' \
+    'export MESA_VK_VERSION_OVERRIDE=1.3' \
+    'export MESA_GL_VERSION_OVERRIDE=4.3' \
+    'export MESA_GLSL_VERSION_OVERRIDE=430' \
+    'export VK_ICD_FILENAMES=/data/data/com.termux/files/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json' \
+    'export GALLIUM_DRIVER=freedreno' \
+    'export WINEESYNC=1' \
+    'export DXVK_ASYNC=1' \
+    'export DXVK_STATE_CACHE=1' \
+    'export DXVK_LOG_LEVEL=none' \
+    'export BOX64_WINE="$HOME/wine-ge/bin/wine"' \
+    >> ~/.bashrc
+}
 source ~/.bashrc || true
 
 # ── 6. GitHub Actions self-hosted runner ──────────────────────────────────────
@@ -130,12 +131,12 @@ fi
 
 # ── 7. Create a startup script to launch the runner ──────────────────────────
 echo "[7/7] Creating runner startup script..."
-cat > "$HOME/start-runner.sh" << 'REOF'
-#!/data/data/com.termux/files/usr/bin/bash
-source ~/.bashrc
-cd "$HOME/actions-runner"
-./run.sh
-REOF
+printf '%s\n' \
+  '#!/data/data/com.termux/files/usr/bin/bash' \
+  'source ~/.bashrc' \
+  'cd "$HOME/actions-runner"' \
+  './run.sh' \
+  > "$HOME/start-runner.sh"
 chmod +x "$HOME/start-runner.sh"
 
 echo ""
