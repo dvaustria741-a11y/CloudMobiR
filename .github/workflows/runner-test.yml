@@ -1,0 +1,30 @@
+name: CloudMobiR - Runner Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, ARM64]
+
+    steps:
+      - name: Check runner
+        run: |
+          echo "CloudMobiR is running!"
+          echo "========================"
+          uname -a
+          echo ""
+          echo "Architecture:"
+          uname -m
+          echo ""
+          echo "Current user:"
+          whoami
+          echo ""
+          echo "Debian version:"
+          cat /etc/os-release
+          echo ""
+          echo "Disk space:"
+          df -h /
+          echo ""
+          echo "Memory:"
+          free -h
